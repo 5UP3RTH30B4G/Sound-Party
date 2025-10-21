@@ -2,7 +2,10 @@ module.exports = {
 // server configuration for PM2 process manager
   apps: [{
     name: 'Sound-Party-server',
-    script: './server/index.js',
+  // Use an npm wrapper script so we can run the env generator prior to server start
+  // PM2 will run `npm run start:pm2` which executes the generator then starts the server
+  script: 'npm',
+  args: 'run start:pm2',
     cwd: process.cwd(),
     env: {
       NODE_ENV: 'production',
@@ -22,9 +25,37 @@ module.exports = {
     error_file: './logs/server-error.log',
     out_file: './logs/server-out.log',
     log_file: './logs/server.log',
-    time: true,
-    autorestart: true,
-    max_restarts: 10,
-    min_uptime: '10s'
-  }]
-};
+    // PM2 application config example
+    // This example starts the generator via npm and then starts the server.
+    // It assumes you run `npm run start:pm2` which executes the generator then starts the server.
+    module.exports = {
+      apps: [
+        {
+          name: 'Sound-Party-server',
+          script: 'npm',
+          args: 'run start:pm2',
+          cwd: process.cwd(),
+          env: {
+            NODE_ENV: 'production',
+            PORT_SERVER: 5000,
+            PORT_CLIENT: 3000,
+            CLIENT_URL: 'https://your-frontend.example.com',
+            API_BASE_URL: 'https://your-api.example.com',
+            SPOTIFY_CLIENT_ID: 'your_spotify_client_id',
+            SPOTIFY_CLIENT_SECRET: 'your_spotify_client_secret',
+            SPOTIFY_REDIRECT_URI: 'https://your-frontend.example.com/auth/callback'
+          },
+          instances: 1,
+          exec_mode: 'fork',
+          watch: false,
+          max_memory_restart: '500M',
+          error_file: './logs/server-error.log',
+          out_file: './logs/server-out.log',
+          log_file: './logs/server.log',
+          time: true,
+          autorestart: true,
+          max_restarts: 10,
+          min_uptime: '10s'
+        }
+      ]
+    };

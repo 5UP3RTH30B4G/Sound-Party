@@ -8,7 +8,9 @@ import {
   IconButton,
   Typography,
   Box,
-  Chip
+  Chip,
+  ToggleButton,
+  ToggleButtonGroup
 } from '@mui/material';
 import { Remove, MusicNote, PlayArrow } from '@mui/icons-material';
 import { useSocket } from '../contexts/SocketContext';
@@ -17,8 +19,11 @@ import axios from 'axios';
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || process.env.REACT_APP_API_URL;
 
 const QueueComponent = () => {
-  const { playbackState, emitTrackRemovedFromQueue } = useSocket();
-  const { queue } = playbackState;
+  const { playbackState, partyState, isSyncedWithParty, togglePartySync, emitTrackRemovedFromQueue } = useSocket();
+  const activeState = isSyncedWithParty ? partyState : playbackState;
+  // Guard: activeState may be undefined while the socket/context initializes.
+  // Provide a default empty queue to avoid runtime destructure errors.
+  const { queue = [] } = activeState || {};
 
   const handleRemoveFromQueue = (trackId) => {
     console.log('🗑️ Suppression de la queue:', trackId);
@@ -49,6 +54,12 @@ const QueueComponent = () => {
     }
   };
 
+  const handleModeToggle = (event, newMode) => {
+    if (newMode !== null) {
+      togglePartySync(newMode === 'party');
+    }
+  };
+
   const formatDuration = (ms) => {
     const minutes = Math.floor(ms / 60000);
     const seconds = Math.floor((ms % 60000) / 1000);
@@ -73,21 +84,63 @@ const QueueComponent = () => {
       flexDirection: 'column',
       overflow: 'hidden',
       maxHeight: { xs: '40vh', sm: '50vh', md: '60vh' },
-      minHeight: 0
+      minHeight: 0,
+      position: 'relative'
     }}>
+      {!isSyncedWithParty && (
+        <Box sx={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: 'rgba(0, 0, 0, 0.7)',
+          zIndex: 10,
+          borderRadius: 1
+        }}>
+          <Typography variant="h6" sx={{ color: 'warning.main', textAlign: 'center', px: 2 }}>
+            📋 File d'attente disponible uniquement en mode Party
+          </Typography>
+        </Box>
+      )}
+      
       {queue && queue.length > 0 ? (
         <>
-          <Typography 
-            variant="body2" 
-            color="text.secondary" 
-            sx={{ 
-              mb: 2,
-              fontSize: { xs: '0.875rem', sm: '0.875rem' },
-              fontWeight: 'medium'
-            }}
-          >
-            {queue.length} chanson{queue.length > 1 ? 's' : ''} en attente
-          </Typography>
+          <Box sx={{ 
+            display: 'flex', 
+            justifyContent: 'space-between', 
+            alignItems: 'center', 
+            mb: 2 
+          }}>
+            <Typography 
+              variant="body2" 
+              color="text.secondary" 
+              sx={{ 
+                fontSize: { xs: '0.875rem', sm: '0.875rem' },
+                fontWeight: 'medium'
+              }}
+            >
+              {queue.length} chanson{queue.length > 1 ? 's' : ''} en attente
+            </Typography>
+            
+            <ToggleButtonGroup
+              value={isSyncedWithParty ? 'party' : 'solo'}
+              exclusive
+              onChange={handleModeToggle}
+              size="small"
+              sx={{ height: 28 }}
+            >
+              <ToggleButton value="solo" sx={{ px: 1.5, fontSize: '0.75rem' }}>
+                Solo
+              </ToggleButton>
+              <ToggleButton value="party" sx={{ px: 1.5, fontSize: '0.75rem' }}>
+                Party
+              </ToggleButton>
+            </ToggleButtonGroup>
+          </Box>
           
           <List sx={{ 
             flex: 1, 

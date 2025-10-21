@@ -21,7 +21,7 @@ const SearchComponent = ({ onTrackQueued }) => {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const { API_BASE_URL } = useAuth();
-  const { socket, playbackState } = useSocket();
+  const { socket, playbackState, isSyncedWithParty } = useSocket();
 
   const emitTrackQueued = useCallback((track) => {
     console.log('🔌 Socket disponible:', !!socket);
@@ -158,14 +158,36 @@ const SearchComponent = ({ onTrackQueued }) => {
       height: '100%', 
       display: 'flex', 
       flexDirection: 'column',
-      overflow: 'hidden'
+      overflow: 'hidden',
+      position: 'relative'
     }}>
+      {!isSyncedWithParty && (
+        <Box sx={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: 'rgba(0, 0, 0, 0.7)',
+          zIndex: 10,
+          borderRadius: 1
+        }}>
+          <Typography variant="h6" sx={{ color: 'warning.main', textAlign: 'center', px: 2 }}>
+            🔍 Recherche disponible uniquement en mode Party
+          </Typography>
+        </Box>
+      )}
+      
       {/* Barre de recherche optimisée pour mobile */}
       <TextField
         fullWidth
         variant="outlined"
         placeholder="Rechercher des musiques..."
         value={query}
+        disabled={!isSyncedWithParty}
         onChange={(e) => {
           setQuery(e.target.value);
           if (e.target.value.length > 0) {

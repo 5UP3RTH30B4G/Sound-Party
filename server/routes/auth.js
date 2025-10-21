@@ -7,7 +7,7 @@ const router = express.Router();
 // Configuration des variables d'environnement avec vérifications
 const CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
 const CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
-const REDIRECT_URI = process.env.SPOTIFY_REDIRECT_URI || `http://127.0.0.1:${process.env.PORT || 5000}/auth/callback`;
+const REDIRECT_URI = process.env.SPOTIFY_REDIRECT_URI || `http://127.0.0.1:${process.env.PORT_SERVER || process.env.PORT || 5000}/auth/callback`;
 const CLIENT_URL = process.env.CLIENT_URL || process.env.CLIENT_ORIGIN || 'http://127.0.0.1:3000';
 
 // Vérifications des variables critiques

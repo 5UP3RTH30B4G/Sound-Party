@@ -21,6 +21,14 @@ export const SocketProvider = ({ children, socket }) => {
     queue: [],
     fetcher: null
   });
+  const [partyState, setPartyState] = useState({
+    isPlaying: false,
+    currentTrack: null,
+    position: 0,
+    queue: [],
+    fetcher: null
+  });
+  const [isSyncedWithParty, setIsSyncedWithParty] = useState(false);
   const [messages, setMessages] = useState([]);
   const [serverRateLimitedMs, setServerRateLimitedMs] = useState(0);
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
@@ -88,6 +96,11 @@ export const SocketProvider = ({ children, socket }) => {
     // Événements de lecture
     socket.on('playback_state_updated', (state) => {
       setPlaybackState(state);
+    });
+
+    // Événement de mise à jour de l'état party
+    socket.on('party_state_updated', (state) => {
+      setPartyState(state);
     });
 
     // Server-side rate limit notification: pause client polling/backoff
@@ -254,7 +267,9 @@ export const SocketProvider = ({ children, socket }) => {
     // Synchronisation complète
     socket.on('full_sync', (data) => {
       setPlaybackState(data.playbackState);
+      setPartyState(data.partyState);
       setConnectedUsers(data.connectedUsers);
+      setIsSyncedWithParty(!!data.isSyncedWithParty);
     });
 
     return () => {
@@ -265,6 +280,7 @@ export const SocketProvider = ({ children, socket }) => {
       socket.off('user_joined');
       socket.off('user_left');
       socket.off('playback_state_updated');
+      socket.off('party_state_updated');
       socket.off('playback_control_received');
       socket.off('queue_updated');
       socket.off('queue_message');
@@ -394,10 +410,20 @@ export const SocketProvider = ({ children, socket }) => {
     }
   };
 
+  const togglePartySync = (isSynced) => {
+    if (socket && authenticated) {
+      console.log(`🔄 Basculer mode ${isSynced ? 'Party' : 'Solo'}`);
+      socket.emit('toggle_party_sync', { isSynced });
+      setIsSyncedWithParty(isSynced);
+    }
+  };
+
   const value = {
     socket,
     connectedUsers,
     playbackState,
+    partyState,
+    isSyncedWithParty,
     messages,
     connectionStatus,
     serverRateLimitedMs,
@@ -409,6 +435,7 @@ export const SocketProvider = ({ children, socket }) => {
     emitSearchShared,
     requestSync,
     emitPlayNextFromQueue,
+    togglePartySync,
     addSystemMessage
   };
 

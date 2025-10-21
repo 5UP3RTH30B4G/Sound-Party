@@ -12,17 +12,19 @@ import '../styles/theme.css';
 const MainApp = () => {
   const navigate = useNavigate();
   const { user, authenticated, loading, logout, checkAuthStatus } = useAuth();
-  const { connectionStatus, connectedUsers, playbackState } = useSocket();
+  const { connectionStatus, connectedUsers, playbackState, isSyncedWithParty, togglePartySync } = useSocket();
 
   useEffect(() => {
     if (!loading && !authenticated) navigate('/login');
-    // Suppression de la vérification automatique pour éviter la boucle infinie
-    // if (authenticated && user) setTimeout(() => checkAuthStatus(), 1000);
-  }, [authenticated, loading, navigate]);
+    }, [authenticated, loading, navigate]);
 
   const handleLogout = async () => {
     await logout();
     navigate('/login');
+  };
+
+  const handleModeToggle = () => {
+    togglePartySync(!isSyncedWithParty);
   };
 
   if (loading) {
@@ -52,6 +54,14 @@ const MainApp = () => {
               <span className="status-dot"></span>
               {connectionStatus === 'connected' ? 'Connecté' : 'Déconnecté'}
             </div>
+
+            <button 
+              className={`mode-toggle-btn ${isSyncedWithParty ? 'party-mode' : 'solo-mode'}`}
+              onClick={handleModeToggle}
+              title={isSyncedWithParty ? 'Passer en mode Solo' : 'Passer en mode Party'}
+            >
+              {isSyncedWithParty ? '🎉 Mode Party' : '🎧 Mode Solo'}
+            </button>
             
             {user && (
               <div className="user-info">

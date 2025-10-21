@@ -28,13 +28,20 @@ import { useSocket } from '../contexts/SocketContext';
 const PlayerControls = () => {
   const { API_BASE_URL, refreshToken, user } = useAuth();
   const { 
-    playbackState, 
+    playbackState,
+    partyState,
+    isSyncedWithParty,
     emitPlaybackControl, 
     emitPlaybackStateChange,
     emitPlayNextFromQueue,
     emitTrackRemovedFromQueue,
     serverRateLimitedMs
   } = useSocket();
+
+  // Utiliser l'état approprié selon le mode
+  // Guard: partyState or playbackState may be undefined while the socket initializes.
+  // Default to an empty object so property reads (e.g. currentTrack) won't throw.
+  const activeState = isSyncedWithParty ? (partyState || {}) : (playbackState || {});
 
   const [currentTrack, setCurrentTrack] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -49,6 +56,13 @@ const PlayerControls = () => {
   // Récupérer l'état de lecture depuis Spotify API (logique originale)
   const fetchPlaybackState = useCallback(async () => {
     if (!API_BASE_URL || !refreshToken || rateLimited) return;
+    // If we're in Party mode, only the designated fetcher client should call Spotify.
+    try {
+      const amIFetcher = activeState?.fetcher && (activeState.fetcher.spotifyId === user?.id || activeState.fetcher.name === user?.display_name);
+      if (isSyncedWithParty && !amIFetcher) return;
+    } catch (e) {
+      // ignore and continue if we can't determine fetcher yet
+    }
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/spotify/playback-state`, {
@@ -62,6 +76,13 @@ const PlayerControls = () => {
           setIsPlaying(data.is_playing);
           setPosition(data.progress_ms || 0);
           setDuration(data.item?.duration_ms || 0);
+          // Align estimator baseline immediately after fetching to avoid drift
+          try {
+            basePositionRef.current = data.progress_ms || 0;
+            lastPlaybackUpdateRef.current = Date.now();
+          } catch (e) {
+            // ignore if refs unavailable during initialization
+          }
           setVolume(data.device?.volume_percent || 50);
           
           // Émettre l'état vers les autres clients
@@ -88,6 +109,36 @@ const PlayerControls = () => {
       setError('Erreur de connexion Spotify');
     }
   }, [API_BASE_URL, refreshToken, emitPlaybackStateChange, rateLimited]);
+
+  // When entering Party mode, clear pending timers/estimators to avoid
+  // briefly showing local playback info before party state arrives.
+  useEffect(() => {
+    if (isSyncedWithParty) {
+      // clear any scheduled API call
+      if (scheduledRef.current) {
+        clearTimeout(scheduledRef.current);
+        scheduledRef.current = null;
+      }
+      // clear estimator interval
+      if (estimateIntervalRef.current) {
+        clearInterval(estimateIntervalRef.current);
+        estimateIntervalRef.current = null;
+      }
+      // also reset baseline refs
+      basePositionRef.current = 0;
+      lastPlaybackUpdateRef.current = Date.now();
+    }
+  }, [isSyncedWithParty]);
+
+  // When entering Party mode, clear local displayed track immediately to avoid
+  // briefly showing the user's local playback before the party state arrives.
+  useEffect(() => {
+    if (isSyncedWithParty) {
+      setCurrentTrack(null);
+      setIsPlaying(false);
+      setPosition(0);
+    }
+  }, [isSyncedWithParty]);
 
   // Récupérer les appareils disponibles
   const fetchDevices = useCallback(async () => {
@@ -147,12 +198,18 @@ const PlayerControls = () => {
 
   // Polling régulier de l'état Spotify
   useEffect(() => {
-    const amIFetcher = playbackState?.fetcher && (playbackState.fetcher.spotifyId === user?.id || playbackState.fetcher.name === user?.display_name);
-    const noFetcher = !playbackState?.fetcher;
-    const canFetch = amIFetcher || (noFetcher && user?.product === 'premium');
+    const amIFetcher = activeState?.fetcher && (activeState.fetcher.spotifyId === user?.id || activeState.fetcher.name === user?.display_name);
+    const noFetcher = !activeState?.fetcher;
+    // When synced with a party, only the fetcher should poll Spotify directly.
+    let canFetch;
+    if (isSyncedWithParty) {
+      canFetch = !!amIFetcher;
+    } else {
+      canFetch = amIFetcher || (noFetcher && user?.product === 'premium');
+    }
 
     if (!canFetch) {
-      // If we're not the fetcher, rely on socket updates only
+      // If we're not allowed to fetch, rely on socket updates only
       return;
     }
 
@@ -172,16 +229,46 @@ const PlayerControls = () => {
         scheduledRef.current = null;
       }
     };
-  }, [fetchPlaybackState, fetchDevices, rateLimited, playbackState, user, performThrottledFetch, serverRateLimitedMs]);
+  }, [fetchPlaybackState, fetchDevices, rateLimited, activeState, user, performThrottledFetch, serverRateLimitedMs]);
 
-  // Synchroniser avec les événements socket
+  // Synchroniser avec les événements socket.
+  // En mode Party, n'afficher une piste actuelle que si elle provient de la file d'attente partagée.
   useEffect(() => {
-    if (playbackState.currentTrack) {
-      setCurrentTrack(playbackState.currentTrack);
-      setIsPlaying(playbackState.isPlaying);
-      setPosition(playbackState.position || 0);
+    if (isSyncedWithParty) {
+      const partyTrack = partyState?.currentTrack;
+      const inQueue = partyState?.queue && Array.isArray(partyState.queue) && partyState.queue.some(t => t.id === partyTrack?.id);
+      if (partyTrack && inQueue) {
+        setCurrentTrack(partyTrack);
+        setIsPlaying(partyState.isPlaying);
+        setPosition(partyState.position || 0);
+      } else {
+        // No queue-originating track is playing — clear local display
+        setCurrentTrack(null);
+        setIsPlaying(false);
+        setPosition(0);
+      }
+    } else {
+      // Solo mode: display local playback state as usual
+      if (playbackState?.currentTrack) {
+        setCurrentTrack(playbackState.currentTrack);
+        setIsPlaying(playbackState.isPlaying);
+        setPosition(playbackState.position || 0);
+      }
     }
-  }, [playbackState]);
+  }, [isSyncedWithParty, partyState, playbackState]);
+
+  // When returning from Party mode to Solo, refresh playback state from the API
+  // to correct any position drift that occurred while synced to the party.
+  useEffect(() => {
+    if (!isSyncedWithParty) {
+      // We're now in Solo mode — refresh local playback info
+      try {
+        fetchPlaybackState();
+      } catch (err) {
+        console.warn('Erreur en récupérant l\'état après sortie du mode Party:', err);
+      }
+    }
+  }, [isSyncedWithParty, fetchPlaybackState]);
 
   // Estimate current position using the last known playbackState position + elapsed time
   useEffect(() => {
@@ -198,12 +285,12 @@ const PlayerControls = () => {
     // When playbackState updates, capture its baseline position and timestamp
     // Only take baseline playback position from server when this client is allowed
     // to see full playback info (fetcher) or when there is no fetcher and the user is premium.
-    const amIFetcher = playbackState?.fetcher && (playbackState.fetcher.spotifyId === user?.id || playbackState.fetcher.name === user?.display_name);
-    const noFetcher = !playbackState?.fetcher;
+    const amIFetcher = activeState?.fetcher && (activeState.fetcher.spotifyId === user?.id || activeState.fetcher.name === user?.display_name);
+    const noFetcher = !activeState?.fetcher;
     const canUsePlaybackState = amIFetcher || (noFetcher && user?.product === 'premium');
 
-    if (canUsePlaybackState && playbackState && playbackState.position !== undefined) {
-      basePositionRef.current = playbackState.position || 0;
+    if (canUsePlaybackState && activeState && activeState.position !== undefined) {
+      basePositionRef.current = activeState.position || 0;
       lastPlaybackUpdateRef.current = Date.now();
     }
 
@@ -220,7 +307,7 @@ const PlayerControls = () => {
         setPosition(estimated);
 
         // If there is a queue, trigger next when within margin (with cooldown)
-        if (playbackState && playbackState.queue && playbackState.queue.length > 0) {
+        if (activeState && activeState.queue && activeState.queue.length > 0) {
           if (now - (lastAutoPlayRequestRef.current || 0) >= COOLDOWN_MS) {
             if (estimated >= (duration - END_MARGIN_MS)) {
               emitPlayNextFromQueue();
@@ -253,7 +340,7 @@ const PlayerControls = () => {
         console.log('🎵 autoPlayTrackFromQueue reçu pour:', track.name, 'demandé par', requestedBy);
 
         // Gate: only the fetcher or a premium user should attempt to call Spotify API directly
-        const amIFetcher = playbackState?.fetcher && (playbackState.fetcher.spotifyId === user?.id || playbackState.fetcher.name === user?.display_name);
+        const amIFetcher = activeState?.fetcher && (activeState.fetcher.spotifyId === user?.id || activeState.fetcher.name === user?.display_name);
         const canAttemptPlay = amIFetcher || user?.product === 'premium';
 
         if (!canAttemptPlay) {
@@ -471,13 +558,27 @@ const PlayerControls = () => {
                     />
                   )}
                   <Box sx={{ minWidth: 0, flex: 1 }}>
-                    <Typography 
-                      variant="subtitle1" 
-                      noWrap
-                      sx={{ fontWeight: 'bold' }}
-                    >
-                      {currentTrack.name}
-                    </Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
+                      <Typography 
+                        variant="subtitle1" 
+                        noWrap
+                        sx={{ fontWeight: 'bold', flex: 1 }}
+                      >
+                        {currentTrack.name}
+                      </Typography>
+                      {isSyncedWithParty && (
+                        <Chip 
+                          label="Synchronisée" 
+                          size="small" 
+                          color="primary" 
+                          sx={{ 
+                            height: 20,
+                            fontSize: '0.7rem',
+                            fontWeight: 'bold'
+                          }}
+                        />
+                      )}
+                    </Box>
                     <Typography 
                       variant="body2" 
                       color="text.secondary" 
