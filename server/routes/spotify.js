@@ -160,27 +160,61 @@ router.post('/previous', requireAuth, async (req, res) => {
 });
 
 // Rechercher des chansons
-router.get('/search', requireAuth, async (req, res) => {
+// This endpoint accepts authenticated requests as before, but if the requester
+// is not authenticated we allow the server to perform the search using the
+// current party fetcher session (if one exists). That enables solo clients to
+// use the fetcher for searches when the UI allowed it.
+router.get('/search', async (req, res) => {
   const { q, type = 'track', limit = 20 } = req.query;
-  
+
   if (!q) {
     return res.status(400).json({ error: 'Paramètre de recherche manquant' });
   }
 
   try {
+    // Try to resolve an access token from cookies/session like requireAuth would
+    let access_token = req.cookies?.access_token;
+    let sessionId = req.cookies?.session_id;
+
+    if (!access_token && sessionId) {
+      const session = sessionManager.getSession(sessionId);
+      if (session && session.access_token) access_token = session.access_token;
+    }
+
+    // If still no access token, try to use the active party fetcher's session
+    if (!access_token) {
+      try {
+        const playbackState = socketHandler.getPlaybackState();
+        if (playbackState && playbackState.fetcher && playbackState.fetcher.sessionId) {
+          const fsess = sessionManager.getSession(playbackState.fetcher.sessionId);
+          if (fsess && fsess.access_token) {
+            access_token = fsess.access_token;
+            sessionId = playbackState.fetcher.sessionId;
+            if (typeof shouldLog === 'function' ? shouldLog('search_using_fetcher') : true) console.log('ℹ️ Using fetcher session for unauthenticated search');
+          }
+        }
+      } catch (err) {
+        // ignore — fallback to auth failure below
+      }
+    }
+
+    if (!access_token) {
+      return res.status(401).json({ error: 'Not authenticated and no fetcher available' });
+    }
+
     const response = await callSpotify({
       method: 'get',
       url: 'https://api.spotify.com/v1/search',
-      headers: { 'Authorization': 'Bearer ' + req.access_token },
+      headers: { 'Authorization': 'Bearer ' + access_token },
       params: { q, type, limit }
     });
     res.json(response.data);
   } catch (error) {
     if (error.status === 429) return res.status(429).json({ error: 'Rate limited', ms: error.ms });
-      const status = error.response?.status || 500;
-      const message = error.response?.data?.error?.message || error.message || 'Erreur lors de la recherche';
-      console.error('Erreur search:', error.response?.data || error.message);
-      return res.status(status).json({ error: message });
+    const status = error.response?.status || 500;
+    const message = error.response?.data?.error?.message || error.message || 'Erreur lors de la recherche';
+    console.error('Erreur search:', error.response?.data || error.message);
+    return res.status(status).json({ error: message });
   }
 });
 

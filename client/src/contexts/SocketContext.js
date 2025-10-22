@@ -128,7 +128,15 @@ export const SocketProvider = ({ children, socket }) => {
     // Événements de file d'attente
     socket.on('queue_updated', (data) => {
       console.log('🔄 Queue mise à jour:', data);
-      setPlaybackState(prev => ({ ...prev, queue: data.queue }));
+      try {
+        if (data.isParty) {
+          setPartyState(prev => ({ ...prev, queue: data.queue }));
+        } else {
+          setPlaybackState(prev => ({ ...prev, queue: data.queue }));
+        }
+      } catch (err) {
+        console.warn('⚠️ Erreur lors de la mise à jour de la queue côté client:', err);
+      }
       
       // Si c'est une suppression automatique, émettre un message spécial
       if (data.autoRemoved && data.removedTrack) {

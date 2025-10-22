@@ -211,7 +211,9 @@ const socketHandler = (io) => {
 
       socket.emit('full_sync', {
         playbackState: playbackForNewUser,
-        connectedUsers: usersList
+        partyState: partyPlaybackState,
+        connectedUsers: usersList,
+        isSyncedWithParty: !!userData.isSyncedWithParty
       });
     });
 
@@ -345,7 +347,7 @@ const socketHandler = (io) => {
             console.log(`✅ play_next_from_queue: Played ${nextTrack.name} using session ${sessionIdToUse}`);
             // Remove track from queue and broadcast
             const removed = currentPlaybackState.queue.shift();
-            io.emit('queue_updated', { queue: currentPlaybackState.queue, autoRemoved: true, removedTrack: removed });
+            io.emit('queue_updated', { queue: currentPlaybackState.queue, autoRemoved: true, removedTrack: removed, isParty: false });
 
             // Update playback state
             currentPlaybackState.currentTrack = nextTrack;
@@ -498,7 +500,7 @@ const socketHandler = (io) => {
 
             if (playRes && playRes.ok) {
               const removed = targetState.queue.shift();
-              io.emit('queue_updated', { queue: targetState.queue, autoRemoved: true, removedTrack: removed });
+              io.emit('queue_updated', { queue: targetState.queue, autoRemoved: true, removedTrack: removed, isParty: isPartyMode });
               targetState.currentTrack = nextTrack;
               targetState.isPlaying = true;
               targetState.position = 0;
@@ -613,7 +615,7 @@ const socketHandler = (io) => {
             if (playRes && playRes.ok) {
               // Remove from queue and broadcast
               const removed = targetState.queue.shift();
-              io.emit('queue_updated', { queue: targetState.queue, autoRemoved: true, removedTrack: removed });
+              io.emit('queue_updated', { queue: targetState.queue, autoRemoved: true, removedTrack: removed, isParty: isPartyMode });
 
               // Update server playback state
               targetState.currentTrack = nextTrack;
@@ -863,10 +865,13 @@ const socketHandler = (io) => {
         return;
       }
 
-      // La file d'attente fonctionne seulement en mode Party
-      if (!user.isSyncedWithParty) {
-        console.log(`⚠️ ${user.name} a tenté d'ajouter une piste en mode Solo (non autorisé)`);
-        socket.emit('control_error', { reason: 'La file d\'attente est disponible uniquement en mode Party' });
+      // La file d'attente fonctionne seulement en mode Party,
+      // sauf si un fetcher est actif côté serveur (on autorise alors l'ajout même en Solo).
+      // Note: fetcher info can live in either currentPlaybackState.fetcher or partyPlaybackState.fetcher
+      const fetcherExists = (currentPlaybackState && currentPlaybackState.fetcher) || (partyPlaybackState && partyPlaybackState.fetcher);
+      if (!user.isSyncedWithParty && !fetcherExists) {
+        console.log(`⚠️ ${user.name} a tenté d'ajouter une piste en mode Solo sans fetcher actif (non autorisé)`);
+        socket.emit('control_error', { reason: 'La file d\'attente est disponible uniquement en mode Party ou lorsqu\'un fetcher est actif' });
         return;
       }
 
@@ -886,7 +891,8 @@ const socketHandler = (io) => {
       io.emit('queue_updated', {
         queue: partyPlaybackState.queue,
         addedTrack: queueItem,
-        addedBy: user.name
+        addedBy: user.name,
+        isParty: true
       });
 
       // Message dans le chat
@@ -945,7 +951,8 @@ const socketHandler = (io) => {
                       io.emit('queue_updated', {
                         queue: partyPlaybackState.queue,
                         autoRemoved: true,
-                        removedTrack: removedTrack
+                        removedTrack: removedTrack,
+                        isParty: true
                       });
                     }
                     // Update party playback state
@@ -980,9 +987,11 @@ const socketHandler = (io) => {
       const user = connectedUsers.get(socket.id);
       if (!user) return;
 
-      // La file d'attente fonctionne seulement en mode Party
-      if (!user.isSyncedWithParty) {
-        console.log(`⚠️ ${user.name} a tenté de supprimer une piste en mode Solo (non autorisé)`);
+      // La file d'attente fonctionne seulement en mode Party,
+      // sauf si un fetcher est actif côté serveur (on autorise alors la suppression même en Solo).
+      const fetcherExistsForRemoval = (currentPlaybackState && currentPlaybackState.fetcher) || (partyPlaybackState && partyPlaybackState.fetcher);
+      if (!user.isSyncedWithParty && !fetcherExistsForRemoval) {
+        console.log(`⚠️ ${user.name} a tenté de supprimer une piste en mode Solo sans fetcher actif (non autorisé)`);
         return;
       }
 
@@ -1105,7 +1114,9 @@ const socketHandler = (io) => {
       }
       socket.emit('full_sync', {
         playbackState: playbackForRequester,
-        connectedUsers: usersList
+        partyState: partyPlaybackState,
+        connectedUsers: usersList,
+        isSyncedWithParty: !!requesterIsFetcher // requesterIsFetcher is true when fetcher socket
       });
     });
   });

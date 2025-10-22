@@ -19,7 +19,7 @@ const SearchComponent = ({ onTrackQueued }) => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
-  const { socket, isSyncedWithParty } = useSocket();
+  const { socket, isSyncedWithParty, playbackState, partyState } = useSocket();
 
   const emitTrackQueued = useCallback((track) => {
     if (socket) {
@@ -121,7 +121,7 @@ const SearchComponent = ({ onTrackQueued }) => {
       overflow: 'hidden',
       position: 'relative'
     }}>
-      {!isSyncedWithParty && (
+      {!(isSyncedWithParty || ((partyState && partyState.fetcher) || (playbackState && playbackState.fetcher))) && (
         <Box sx={{
           position: 'absolute',
           top: 0,
@@ -142,12 +142,12 @@ const SearchComponent = ({ onTrackQueued }) => {
       )}
       
       {/* Barre de recherche optimisée pour mobile */}
-      <TextField
+        <TextField
         fullWidth
         variant="outlined"
         placeholder="Rechercher des musiques..."
         value={query}
-        disabled={!isSyncedWithParty}
+        disabled={!(isSyncedWithParty || ((partyState && partyState.fetcher) || (playbackState && playbackState.fetcher)))}
         onChange={(e) => {
           setQuery(e.target.value);
           if (e.target.value.length > 0) {

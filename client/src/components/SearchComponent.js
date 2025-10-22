@@ -21,7 +21,7 @@ const SearchComponent = ({ onTrackQueued }) => {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const { API_BASE_URL } = useAuth();
-  const { socket, playbackState, isSyncedWithParty } = useSocket();
+  const { socket, playbackState, partyState, isSyncedWithParty } = useSocket();
 
   const emitTrackQueued = useCallback((track) => {
     console.log('🔌 Socket disponible:', !!socket);
@@ -161,25 +161,33 @@ const SearchComponent = ({ onTrackQueued }) => {
       overflow: 'hidden',
       position: 'relative'
     }}>
-      {!isSyncedWithParty && (
-        <Box sx={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          backgroundColor: 'rgba(0, 0, 0, 0.7)',
-          zIndex: 10,
-          borderRadius: 1
-        }}>
-          <Typography variant="h6" sx={{ color: 'warning.main', textAlign: 'center', px: 2 }}>
-            🔍 Recherche disponible uniquement en mode Party
-          </Typography>
-        </Box>
-      )}
+      {/* Allow searching/queuing when there's an active fetcher even in Solo mode */}
+      {(() => {
+        const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
+        const isAllowed = isSyncedWithParty || !!effectiveFetcher;
+        if (!isAllowed) {
+          return (
+            <Box sx={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: 'rgba(0, 0, 0, 0.7)',
+              zIndex: 10,
+              borderRadius: 1
+            }}>
+              <Typography variant="h6" sx={{ color: 'warning.main', textAlign: 'center', px: 2 }}>
+                🔍 Recherche disponible uniquement si un fetcher est actif ou en mode Party
+              </Typography>
+            </Box>
+          );
+        }
+        return null;
+      })()}
       
       {/* Barre de recherche optimisée pour mobile */}
       <TextField
@@ -187,7 +195,10 @@ const SearchComponent = ({ onTrackQueued }) => {
         variant="outlined"
         placeholder="Rechercher des musiques..."
         value={query}
-        disabled={!isSyncedWithParty}
+        disabled={(() => {
+          const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
+          return !(isSyncedWithParty || !!effectiveFetcher);
+        })()}
         onChange={(e) => {
           setQuery(e.target.value);
           if (e.target.value.length > 0) {
