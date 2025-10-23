@@ -16,7 +16,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { Button, CircularProgress } from '@mui/material';
 
 const ConnectedUsers = () => {
-  const { connectedUsers, playbackState } = useSocket();
+  const { connectedUsers, playbackState, partyState } = useSocket();
   const { user: authUser, authenticated, refreshToken } = useAuth();
   const [refreshing, setRefreshing] = React.useState({});
 
@@ -37,8 +37,9 @@ const ConnectedUsers = () => {
   };
 
   const getUserStatus = (user) => {
-    // If current fetcher matches this user, mark them as Fetcher
-    const fetcherId = playbackState?.fetcher?.spotifyId || playbackState?.fetcher?.id || playbackState?.fetcher;
+    // Effective fetcher can live in partyState or playbackState
+    const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
+    const fetcherId = effectiveFetcher?.spotifyId || effectiveFetcher?.id || effectiveFetcher;
     if (fetcherId && (fetcherId === user.spotifyId || fetcherId === user.id || fetcherId === user.name)) {
       return { label: 'Fetcher', color: 'primary' };
     }
@@ -92,7 +93,7 @@ const ConnectedUsers = () => {
                         color={status.color}
                         sx={{ height: 18, fontSize: '0.7rem' }}
                       />
-                      {user.premium && (
+                      {(user.premium || user.product === 'premium') && (
                         <Chip
                           label="Premium"
                           size="small"

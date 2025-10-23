@@ -20,6 +20,8 @@ const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || process.env.REACT_APP
 
 const QueueComponent = () => {
   const { playbackState, partyState, isSyncedWithParty, togglePartySync, emitTrackRemovedFromQueue } = useSocket();
+  // Effective fetcher: party fetcher preferred, otherwise solo playback fetcher
+  const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
   const activeState = isSyncedWithParty ? partyState : playbackState;
   // Guard: activeState may be undefined while the socket/context initializes.
   // Provide a default empty queue to avoid runtime destructure errors.
@@ -120,6 +122,14 @@ const QueueComponent = () => {
                 Party
               </ToggleButton>
             </ToggleButtonGroup>
+              {effectiveFetcher && (
+                <Chip
+                  label={`Fetcher: ${effectiveFetcher.name || 'actif'}`}
+                  size="small"
+                  color="info"
+                  sx={{ ml: 1, height: 26, fontSize: '0.7rem' }}
+                />
+              )}
           </Box>
           
           <List sx={{ 

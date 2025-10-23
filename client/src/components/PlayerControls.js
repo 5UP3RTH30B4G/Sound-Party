@@ -58,8 +58,7 @@ const PlayerControls = () => {
     if (!API_BASE_URL || !refreshToken || rateLimited) return;
     // If we're in Party mode, only the designated fetcher client should call Spotify.
     try {
-      const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
-      const amIFetcher = effectiveFetcher && (effectiveFetcher.spotifyId === user?.id || effectiveFetcher.name === user?.display_name);
+      const amIFetcher = activeState?.fetcher && (activeState.fetcher.spotifyId === user?.id || activeState.fetcher.name === user?.display_name);
       if (isSyncedWithParty && !amIFetcher) return;
     } catch (e) {
       // ignore and continue if we can't determine fetcher yet
@@ -197,18 +196,15 @@ const PlayerControls = () => {
     }
   }, [API_BASE_URL, refreshToken, rateLimited, serverRateLimitedMs, fetchPlaybackState, fetchDevices]);
 
-  // Polling régulier de l'état Spotify
+  // Appel Périodique Playback + Devices
   useEffect(() => {
-    const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
-    const amIFetcher = effectiveFetcher && (effectiveFetcher.spotifyId === user?.id || effectiveFetcher.name === user?.display_name);
-    const noFetcher = !effectiveFetcher;
+    const amIFetcher = activeState?.fetcher && (activeState.fetcher.spotifyId === user?.id || activeState.fetcher.name === user?.display_name);
+    const noFetcher = !activeState?.fetcher;
     // When synced with a party, only the fetcher should poll Spotify directly.
     let canFetch;
     if (isSyncedWithParty) {
       canFetch = !!amIFetcher;
     } else {
-      // In Solo, if a fetcher exists, only the fetcher should call Spotify.
-      // Only when there is no fetcher should a premium user poll directly.
       canFetch = amIFetcher || (noFetcher && user?.product === 'premium');
     }
 
@@ -289,10 +285,9 @@ const PlayerControls = () => {
     // When playbackState updates, capture its baseline position and timestamp
     // Only take baseline playback position from server when this client is allowed
     // to see full playback info (fetcher) or when there is no fetcher and the user is premium.
-  const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
-  const amIFetcher = effectiveFetcher && (effectiveFetcher.spotifyId === user?.id || effectiveFetcher.name === user?.display_name);
-  const noFetcher = !effectiveFetcher;
-  const canUsePlaybackState = amIFetcher || (noFetcher && user?.product === 'premium');
+    const amIFetcher = activeState?.fetcher && (activeState.fetcher.spotifyId === user?.id || activeState.fetcher.name === user?.display_name);
+    const noFetcher = !activeState?.fetcher;
+    const canUsePlaybackState = amIFetcher || (noFetcher && user?.product === 'premium');
 
     if (canUsePlaybackState && activeState && activeState.position !== undefined) {
       basePositionRef.current = activeState.position || 0;
@@ -345,12 +340,8 @@ const PlayerControls = () => {
         console.log('🎵 autoPlayTrackFromQueue reçu pour:', track.name, 'demandé par', requestedBy);
 
         // Gate: only the fetcher or a premium user should attempt to call Spotify API directly
-        const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
-        const amIFetcher = effectiveFetcher && (effectiveFetcher.spotifyId === user?.id || effectiveFetcher.name === user?.display_name);
-        const noFetcher = !effectiveFetcher;
-        // Only the fetcher should attempt to call Spotify when a fetcher exists.
-        // If there's no fetcher at all, premium users may attempt playback.
-        const canAttemptPlay = amIFetcher || (noFetcher && user?.product === 'premium');
+        const amIFetcher = activeState?.fetcher && (activeState.fetcher.spotifyId === user?.id || activeState.fetcher.name === user?.display_name);
+        const canAttemptPlay = amIFetcher || user?.product === 'premium';
 
         if (!canAttemptPlay) {
           // Not authorized to perform the play; just refresh state later to reflect server-side actions

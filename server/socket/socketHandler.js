@@ -51,8 +51,12 @@ function shouldLog(key, intervalMs = 5000) {
 const socketHandler = (io) => {
   ioInstance = io;
 
-  // NEW: Broadcast party playback state to all synchronized users
-  const broadcastPartyState = () => {
+  // NEW: Throttled broadcast party playback state to all synchronized users
+  const partyBroadcastIntervalMs = parseInt(process.env.PARTY_BROADCAST_INTERVAL_MS || '1500', 10);
+  let _lastPartyBroadcast = 0;
+  let _partyBroadcastTimeout = null;
+
+  const _doBroadcastPartyState = () => {
     try {
       io.emit('party_state_updated', partyPlaybackState);
     } catch (err) {
@@ -60,8 +64,38 @@ const socketHandler = (io) => {
     }
   };
 
-  // Helper: broadcast masked playback to everyone and full playback only to the exact fetcher socketId
-  const broadcastPlaybackState = () => {
+  const broadcastPartyState = () => {
+    try {
+      const now = Date.now();
+      const since = now - _lastPartyBroadcast;
+      if (since >= partyBroadcastIntervalMs) {
+        _lastPartyBroadcast = now;
+        if (_partyBroadcastTimeout) {
+          clearTimeout(_partyBroadcastTimeout);
+          _partyBroadcastTimeout = null;
+        }
+        _doBroadcastPartyState();
+      } else {
+        if (_partyBroadcastTimeout) return;
+        const delay = partyBroadcastIntervalMs - since;
+        _partyBroadcastTimeout = setTimeout(() => {
+          _lastPartyBroadcast = Date.now();
+          _partyBroadcastTimeout = null;
+          _doBroadcastPartyState();
+        }, delay);
+      }
+    } catch (err) {
+      console.warn('⚠️ Erreur dans broadcastPartyState throttle:', err);
+    }
+  };
+  // Throttled broadcast for playback state to avoid spamming clients and triggering
+  // excessive API usage. Coalesces rapid updates and ensures at most one broadcast
+  // every `playbackBroadcastIntervalMs` milliseconds.
+  const playbackBroadcastIntervalMs = parseInt(process.env.PLAYBACK_BROADCAST_INTERVAL_MS || '1500', 10);
+  let _lastPlaybackBroadcast = 0;
+  let _playbackBroadcastTimeout = null;
+
+  const _doBroadcastPlaybackState = () => {
     try {
       const masked = { ...currentPlaybackState, currentTrack: null, isPlaying: false, position: 0 };
       // masked to everyone
@@ -72,7 +106,7 @@ const socketHandler = (io) => {
         const owner = currentPlaybackState.ownerSpotifyId;
         const fetcherId = currentPlaybackState.fetcher.spotifyId;
         const fullForFetcher = { ...currentPlaybackState };
-        if (owner && owner !== fetcherId) {
+        if (owner && fetcherId && owner !== fetcherId) {
           // mask sensitive playback fields even for fetcher when they don't own it
           fullForFetcher.currentTrack = null;
           fullForFetcher.isPlaying = false;
@@ -82,6 +116,35 @@ const socketHandler = (io) => {
       }
     } catch (err) {
       console.warn('⚠️ Erreur lors du broadcast de l\'état de lecture:', err);
+    }
+  };
+
+  const broadcastPlaybackState = () => {
+    try {
+      const now = Date.now();
+      const since = now - _lastPlaybackBroadcast;
+      if (since >= playbackBroadcastIntervalMs) {
+        _lastPlaybackBroadcast = now;
+        if (_playbackBroadcastTimeout) {
+          clearTimeout(_playbackBroadcastTimeout);
+          _playbackBroadcastTimeout = null;
+        }
+        _doBroadcastPlaybackState();
+      } else {
+        // schedule a coalesced broadcast at the next allowed time
+        if (_playbackBroadcastTimeout) {
+          // already scheduled; no-op (we'll broadcast latest when it fires)
+          return;
+        }
+        const delay = playbackBroadcastIntervalMs - since;
+        _playbackBroadcastTimeout = setTimeout(() => {
+          _lastPlaybackBroadcast = Date.now();
+          _playbackBroadcastTimeout = null;
+          _doBroadcastPlaybackState();
+        }, delay);
+      }
+    } catch (err) {
+      console.warn('⚠️ Erreur dans broadcastPlaybackState throttle:', err);
     }
   };
 
@@ -149,7 +212,28 @@ const socketHandler = (io) => {
       // Attach a connectedAt timestamp so clients can display "connected since" safely
       try {
         userData.connectedAt = new Date();
-        userData.isSyncedWithParty = false; // By default, user is in solo mode
+        // Normalize premium flag and sessionId coming from the client
+        userData.premium = !!userData.premium;
+        userData.sessionId = userData.sessionId || null;
+        if (!userData.premium) {
+          if (typeof shouldLog === 'function' ? shouldLog(`user_no_premium_${userData.spotifyId}`) : true) console.log(`ℹ️ Note: user ${userData.name} connected without premium flag`);
+        }
+        // Preserve previous isSyncedWithParty state when re-registering to avoid
+        // accidentally reverting users back to Solo on reconnects or repeated
+        // 'user_connected' emissions. Check existing user entries for the same
+        // spotifyId and reuse their isSyncedWithParty flag if present.
+        let preservedSync = false;
+        if (existingUser && typeof existingUser.isSyncedWithParty === 'boolean') {
+          preservedSync = !!existingUser.isSyncedWithParty;
+        } else if (existingUserSockets.length > 0) {
+          const prevSocketId = existingUserSockets[0];
+          const prevUser = connectedUsers.get(prevSocketId);
+          if (prevUser && typeof prevUser.isSyncedWithParty === 'boolean') {
+            preservedSync = !!prevUser.isSyncedWithParty;
+          }
+        }
+
+        userData.isSyncedWithParty = preservedSync;
       } catch (e) {
         // ignore if userData is not an object
       }
@@ -281,11 +365,23 @@ const socketHandler = (io) => {
 
     // Événement pour basculer entre mode solo et mode synchronisé party
     socket.on('toggle_party_sync', (data) => {
-      const user = connectedUsers.get(socket.id);
-      if (!user) return;
-
+      let user = connectedUsers.get(socket.id);
       const { isSynced } = data;
-      user.isSyncedWithParty = isSynced;
+
+      // If user record is missing (race or missed registration), create a minimal one
+      if (!user) {
+        console.warn(`⚠️ toggle_party_sync: aucune entrée utilisateur trouvée pour socket ${socket.id}, création d'une entrée minimale`);
+        user = {
+          name: `user_${socket.id}`,
+          spotifyId: null,
+          avatar: null,
+          premium: false,
+          connectedAt: new Date(),
+          isSyncedWithParty: false
+        };
+      }
+
+      user.isSyncedWithParty = !!isSynced;
       connectedUsers.set(socket.id, user);
 
       console.log(`🔄 ${user.name} a basculé en mode ${isSynced ? 'Party' : 'Solo'}`);
@@ -294,12 +390,39 @@ const socketHandler = (io) => {
       const usersList = Array.from(connectedUsers.values());
       io.emit('user_list_updated', usersList);
 
-      // Si l'utilisateur vient de se synchroniser, envoyer l'état party actuel
-      if (isSynced) {
-        socket.emit('party_state_updated', partyPlaybackState);
-      } else {
-        // Si l'utilisateur se désynchronise, lui envoyer son propre état de lecture
-        broadcastPlaybackState();
+      // Send immediate authoritative sync to requester to avoid race that reverts client
+      try {
+        if (user.isSyncedWithParty) {
+          socket.emit('party_state_updated', partyPlaybackState);
+        }
+
+        // Build playback payload for requester (use same logic as request_sync)
+        const requesterIsSynced = !!user.isSyncedWithParty;
+        const requesterIsFetcher = currentPlaybackState.fetcher && currentPlaybackState.fetcher.socketId === socket.id;
+        let playbackForRequester;
+        if (requesterIsSynced) {
+          playbackForRequester = partyPlaybackState;
+        } else {
+          playbackForRequester = { ...currentPlaybackState };
+          if (!requesterIsFetcher) {
+            playbackForRequester = { ...playbackForRequester, currentTrack: null, isPlaying: false, position: 0 };
+          } else {
+            const owner = currentPlaybackState.ownerSpotifyId;
+            const fetcherId = currentPlaybackState.fetcher ? currentPlaybackState.fetcher.spotifyId : null;
+            if (owner && fetcherId && owner !== fetcherId) {
+              playbackForRequester = { ...playbackForRequester, currentTrack: null, isPlaying: false, position: 0 };
+            }
+          }
+        }
+
+        socket.emit('full_sync', {
+          playbackState: playbackForRequester,
+          partyState: partyPlaybackState,
+          connectedUsers: usersList,
+          isSyncedWithParty: requesterIsSynced
+        });
+      } catch (err) {
+        console.warn('⚠️ Erreur en envoyant full_sync après toggle_party_sync:', err);
       }
     });
 
@@ -1098,25 +1221,39 @@ const socketHandler = (io) => {
     // Événement de demande de synchronisation
     socket.on('request_sync', () => {
       const usersList = Array.from(connectedUsers.values());
+      const requester = connectedUsers.get(socket.id);
+
+      // Compute whether requester is synced with party according to stored map
+      const requesterIsSynced = !!(requester && requester.isSyncedWithParty);
+
       // Determine whether the requester is the exact fetcher socket
       const requesterIsFetcher = currentPlaybackState.fetcher && currentPlaybackState.fetcher.socketId === socket.id;
-      let playbackForRequester = { ...currentPlaybackState };
-      if (!requesterIsFetcher) {
-        // mask for non-fetchers
-        playbackForRequester = { ...playbackForRequester, currentTrack: null, isPlaying: false, position: 0 };
+
+      // Build the playback payload depending on whether requester is synced or fetcher
+      let playbackForRequester;
+      if (requesterIsSynced) {
+        // If synced, send the party playback state
+        playbackForRequester = partyPlaybackState;
       } else {
-        // If requester is fetcher but does not own the current playback, mask as well
-        const owner = currentPlaybackState.ownerSpotifyId;
-        const fetcherId = currentPlaybackState.fetcher ? currentPlaybackState.fetcher.spotifyId : null;
-        if (owner && fetcherId && owner !== fetcherId) {
+        // If not synced, only provide the masked currentPlaybackState unless requester is the fetcher
+        playbackForRequester = { ...currentPlaybackState };
+        if (!requesterIsFetcher) {
           playbackForRequester = { ...playbackForRequester, currentTrack: null, isPlaying: false, position: 0 };
+        } else {
+          // If requester is fetcher but they don't own playback, still mask sensitive fields
+          const owner = currentPlaybackState.ownerSpotifyId;
+          const fetcherId = currentPlaybackState.fetcher ? currentPlaybackState.fetcher.spotifyId : null;
+          if (owner && fetcherId && owner !== fetcherId) {
+            playbackForRequester = { ...playbackForRequester, currentTrack: null, isPlaying: false, position: 0 };
+          }
         }
       }
+
       socket.emit('full_sync', {
         playbackState: playbackForRequester,
         partyState: partyPlaybackState,
         connectedUsers: usersList,
-        isSyncedWithParty: !!requesterIsFetcher // requesterIsFetcher is true when fetcher socket
+        isSyncedWithParty: requesterIsSynced
       });
     });
   });

@@ -42,16 +42,11 @@ export const SocketProvider = ({ children, socket }) => {
       return;
     }
 
-    // Si l'utilisateur vient de s'authentifier
-      if (authenticated && user && socket.connected) {
-        console.log('👤 Enregistrement utilisateur auprès du serveur:', user.display_name);
-        socket.emit('user_connected', {
-          name: user.display_name,
-          spotifyId: user.id,
-          avatar: user.images?.[0]?.url || null,
-          premium: user.product === 'premium'
-        });
-      }
+    // Note: user registration is handled on socket 'connect' and in the
+    // authentication-change effect below. Avoid emitting 'user_connected'
+    // on every re-run of this effect (which can happen when playback/party
+    // state updates) to prevent spamming the server with repeated
+    // registrations.
 
     // Événements de connexion
     socket.on('connect', () => {
@@ -65,7 +60,8 @@ export const SocketProvider = ({ children, socket }) => {
           name: user.display_name,
           spotifyId: user.id,
           avatar: user.images?.[0]?.url || null,
-          premium: user.product === 'premium'
+          premium: user.product === 'premium',
+          sessionId: user.sessionId || null
         });
       }
     });
@@ -95,7 +91,24 @@ export const SocketProvider = ({ children, socket }) => {
 
     // Événements de lecture
     socket.on('playback_state_updated', (state) => {
-      setPlaybackState(state);
+      try {
+        // If the client is synced with the party, avoid applying solo playback
+        // updates unless this client is the designated fetcher. This prevents
+        // local/solo updates from briefly overriding party UI.
+        const effectiveFetcherFromState = state?.fetcher;
+        const effectiveFetcher = effectiveFetcherFromState || (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
+        const amIFetcher = effectiveFetcher && (effectiveFetcher.spotifyId === user?.id || effectiveFetcher.name === user?.display_name);
+
+        if (isSyncedWithParty && !amIFetcher) {
+          // ignore solo playback update while following a party
+          console.log('Ignored solo playback_state_updated because client is synced with party and not fetcher');
+          return;
+        }
+
+        setPlaybackState(state);
+      } catch (err) {
+        console.warn('Error handling playback_state_updated', err);
+      }
     });
 
     // Événement de mise à jour de l'état party
@@ -242,12 +255,7 @@ export const SocketProvider = ({ children, socket }) => {
     // Événements de chat
     socket.on('chat_message_received', (message) => {
       console.log('💬 Message reçu du serveur:', message);
-      console.log('💬 Ajout au state messages. Ancien count:', messages.length);
-      setMessages(prev => {
-        const newMessages = [...prev, { ...message, type: 'user' }];
-        console.log('💬 Nouveau count messages:', newMessages.length);
-        return newMessages;
-      });
+      setMessages(prev => [...prev, { ...message, type: 'user' }]);
     });
 
     // Événements de recherche partagée
@@ -299,7 +307,7 @@ export const SocketProvider = ({ children, socket }) => {
       socket.off('force_disconnect');
       socket.off('full_sync');
     };
-  }, [socket, authenticated, user]);
+  }, [socket, authenticated, user, isSyncedWithParty, partyState, playbackState, connectionStatus]);
 
   // Effet séparé pour gérer les changements d'authentification
   useEffect(() => {
@@ -324,12 +332,14 @@ export const SocketProvider = ({ children, socket }) => {
         // Délai pour éviter les connexions multiples rapides
         setTimeout(() => {
           if (socket.connected && connectionStatus !== 'force_disconnected') {
-            socket.emit('user_connected', {
-              name: user.display_name,
-              spotifyId: user.id,
-              avatar: user.images?.[0]?.url || null
-            });
-          }
+              socket.emit('user_connected', {
+                name: user.display_name,
+                spotifyId: user.id,
+                avatar: user.images?.[0]?.url || null,
+                premium: user.product === 'premium',
+                sessionId: user.sessionId || null
+              });
+            }
         }, 500);
       } else {
         console.log('⚠️ Utilisateur déjà connecté, éviter la double connexion');
