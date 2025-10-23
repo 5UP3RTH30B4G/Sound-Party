@@ -35,9 +35,10 @@ function App() {
   useEffect(() => {
     // Initialiser la connexion Socket.IO
     // Use same origin for Socket.IO in production (served by nginx)
-    const serverUrl = process.env.NODE_ENV === 'production' 
-      ? window.location.origin 
-      : (process.env.REACT_APP_SERVER_URL || process.env.REACT_APP_API_BASE_URL);
+    const defaultDevServer = `http://127.0.0.1:${process.env.PORT_SERVER || process.env.PORT || 5000}`;
+    const serverUrl = process.env.NODE_ENV === 'production'
+      ? window.location.origin
+      : (process.env.REACT_APP_SERVER_URL || process.env.REACT_APP_API_BASE_URL || defaultDevServer);
     console.log('🔌 Connecting to Socket.IO server:', serverUrl);
     const newSocket = io(serverUrl);
     setSocket(newSocket);

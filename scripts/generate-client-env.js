@@ -40,8 +40,8 @@ function resolve(name) {
 }
 
 // Build server and client URLs
-const apiBase = resolve('API_BASE_URL') || `http://127.0.0.1:${process.env.PORT || process.env.PORT || 5000}`;
-const clientHost = resolve('CLIENT_URL') || `http://127.0.0.1:${process.env.PORT || 3000}`;
+const apiBase = resolve('API_BASE_URL') || `http://127.0.0.1:${process.env.PORT_SERVER || process.env.PORT || 5000}`;
+const clientHost = resolve('CLIENT_URL') || `http://127.0.0.1:${process.env.PORT_CLIENT || 3000}`;
 
 const clientEnv = {
   REACT_APP_API_BASE_URL: apiBase,
