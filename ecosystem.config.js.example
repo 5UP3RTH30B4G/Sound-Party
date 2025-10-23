@@ -26,8 +26,8 @@ module.exports = {
           cwd: process.cwd(),
           env: {
             NODE_ENV: 'production',
-            PORT_SERVER: 5000,
-            PORT_CLIENT: 3000,
+            PORT: 5000,
+            PORT: 3000,
             CLIENT_URL: 'https://your-frontend.example.com',
             API_BASE_URL: 'https://your-api.example.com',
             SPOTIFY_CLIENT_ID: 'your_spotify_client_id',

@@ -24,7 +24,7 @@ function resolveEnv(name) {
 }
 
 // Prefer explicit server port variable, then generic PORT, then default 5000
-const PORT = resolveEnv('PORT_SERVER') || resolveEnv('PORT') || process.env.PORT || 5000;
+const PORT = resolveEnv('PORT') || resolveEnv('PORT') || process.env.PORT || 5000;
 const CLIENT_URL = resolveEnv('CLIENT_URL') || resolveEnv('CLIENT_ORIGIN') || `http://127.0.0.1:3000`;
 const API_BASE_URL = resolveEnv('API_BASE_URL') || process.env.API_BASE_URL || `http://127.0.0.1:${PORT}`;
 

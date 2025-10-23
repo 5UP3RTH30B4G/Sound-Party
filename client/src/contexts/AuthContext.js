@@ -18,7 +18,7 @@ export const AuthProvider = ({ children }) => {
 
   const API_BASE_URL = process.env.NODE_ENV === 'production' 
     ? window.location.origin 
-  : (process.env.REACT_APP_API_BASE_URL || process.env.REACT_APP_API_URL || `http://127.0.0.1:${process.env.PORT_SERVER || process.env.PORT || 5000}`);
+  : (process.env.REACT_APP_API_BASE_URL || process.env.REACT_APP_API_URL || `http://127.0.0.1:${process.env.PORT || process.env.PORT || 5000}`);
 
   // Configuration axios avec credentials
   axios.defaults.withCredentials = true;

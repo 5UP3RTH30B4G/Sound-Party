@@ -40,8 +40,8 @@ function resolve(name) {
 }
 
 // Build server and client URLs
-const apiBase = resolve('API_BASE_URL') || `http://127.0.0.1:${process.env.PORT_SERVER || process.env.PORT || 5000}`;
-const clientHost = resolve('CLIENT_URL') || `http://127.0.0.1:${process.env.PORT_CLIENT || 3000}`;
+const apiBase = resolve('API_BASE_URL') || `http://127.0.0.1:${process.env.PORT || process.env.PORT || 5000}`;
+const clientHost = resolve('CLIENT_URL') || `http://127.0.0.1:${process.env.PORT || 3000}`;
 
 const clientEnv = {
   REACT_APP_API_BASE_URL: apiBase,
@@ -63,8 +63,8 @@ try {
 // Server env
 const serverEnv = {
   NODE_ENV: process.env.NODE_ENV || APP_ENV,
-  PORT_SERVER: resolve('PORT_SERVER') || resolve('PORT') || process.env.PORT || '5000',
-  PORT_CLIENT: resolve('PORT_CLIENT') || process.env.PORT_CLIENT || '3000',
+  PORT: resolve('PORT') || resolve('PORT') || process.env.PORT || '5000',
+  PORT: resolve('PORT') || process.env.PORT || '3000',
   CLIENT_URL: resolve('CLIENT_URL') || clientHost,
   API_BASE_URL: resolve('API_BASE_URL') || apiBase,
   SPOTIFY_CLIENT_ID: resolve('SPOTIFY_CLIENT_ID') || '',

@@ -459,7 +459,7 @@ const socketHandler = (io) => {
 
       if (sessionIdToUse) {
         try {
-          const API_BASE = process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT_SERVER || process.env.PORT || 5000}`;
+          const API_BASE = process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT || process.env.PORT || 5000}`;
           const resp = await fetch(`${API_BASE.replace(/\/$/, '')}/api/spotify/play-track`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Cookie': `session_id=${sessionIdToUse}` },
@@ -614,7 +614,7 @@ const socketHandler = (io) => {
         if (trySession) {
           const nextTrack = targetState.queue[0];
           try {
-            const API_BASE = process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT_SERVER || process.env.PORT || 5000}`;
+            const API_BASE = process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT || process.env.PORT || 5000}`;
             const playRes = await fetch(`${API_BASE.replace(/\/$/, '')}/api/spotify/play-track`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'Cookie': `session_id=${trySession}` },
@@ -725,7 +725,7 @@ const socketHandler = (io) => {
         if (action.type === 'next' && targetState.queue && targetState.queue.length > 0) {
           const nextTrack = targetState.queue[0];
           try {
-            const API_BASE = process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT_SERVER || process.env.PORT || 5000}`;
+            const API_BASE = process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT || process.env.PORT || 5000}`;
             const playRes = await fetch(`${API_BASE.replace(/\/$/, '')}/api/spotify/play-track`, {
               method: 'POST',
               headers: {
@@ -769,7 +769,7 @@ const socketHandler = (io) => {
           }
         }
 
-  const API_BASE = process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT_SERVER || process.env.PORT || 5000}`;
+  const API_BASE = process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT || process.env.PORT || 5000}`;
         if (typeof shouldLog === 'function' ? shouldLog('relay_control_session') : true) console.log(`🔁 relay control using session_id=${sessionToUse} for action=${action.type} by ${user.name}`);
         const res = await fetch(`${API_BASE.replace(/\/$/, '')}${mapEntry.path}`, {
           method: mapEntry.method,
@@ -937,7 +937,7 @@ const socketHandler = (io) => {
             return;
           }
 
-          const API_BASE = process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT_SERVER || process.env.PORT || 5000}`;
+          const API_BASE = process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT || process.env.PORT || 5000}`;
           const response = await fetch(`${API_BASE.replace(/\/$/, '')}/api/spotify/play-track`, {
             method: 'POST',
             headers: {
@@ -1057,7 +1057,7 @@ const socketHandler = (io) => {
               console.log('⚠️ Aucun session_id disponible pour auto-play du track ajouté');
             } else {
               // Call internal API to play the track using the resolved session cookie
-              const API_BASE = process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT_SERVER || process.env.PORT || 5000}`;
+              const API_BASE = process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT || process.env.PORT || 5000}`;
               (async () => {
                 try {
                   const axios = require('axios');
