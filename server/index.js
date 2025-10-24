@@ -93,7 +93,12 @@ app.use('/auth', authRoutes);
 app.use('/api/spotify', spotifyRoutes);
 
 // Serve client build in production (so client routes like /login work)
-if (isProduction) {
+// Allow opt-in serving of client build from the backend. In a reverse-proxy
+// setup (nginx serving the client on port 3000), we should avoid letting the
+// backend also serve the static files to prevent the frontend being available
+// on the backend port (5000). Set SERVE_CLIENT=true in the env to enable.
+const SERVE_CLIENT = resolveEnv('SERVE_CLIENT') || process.env.SERVE_CLIENT;
+if (isProduction && String(SERVE_CLIENT).toLowerCase() === 'true') {
   const clientBuildPath = path.join(__dirname, '..', 'client', 'build');
   try {
     app.use(express.static(clientBuildPath));

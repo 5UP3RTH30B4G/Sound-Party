@@ -29,6 +29,76 @@ const requireAuth = (req, res, next) => {
 const rateLimiter = require('../utils/rateLimiter');
 const socketHandler = require('../socket/socketHandler');
 
+// Lightweight in-memory counters to detect excessive calls per endpoint (resets every minute)
+const callCounters = new Map();
+function incrementCounter(key) {
+  const now = Date.now();
+  const entry = callCounters.get(key) || { count: 0, windowStart: now };
+  // reset window if older than 60s
+  if (now - entry.windowStart > 60 * 1000) {
+    entry.count = 0;
+    entry.windowStart = now;
+  }
+  entry.count += 1;
+  callCounters.set(key, entry);
+  return entry.count;
+}
+
+// Per-route, per-session counters to identify which sessions cause most traffic
+const sessionCounters = new Map();
+function incrementSessionCounter(routeKey, sessionId) {
+  try {
+    let routeMap = sessionCounters.get(routeKey);
+    if (!routeMap) {
+      routeMap = new Map();
+      sessionCounters.set(routeKey, routeMap);
+    }
+    const now = Date.now();
+    const prev = routeMap.get(sessionId) || { count: 0, windowStart: now };
+    if (now - prev.windowStart > 60 * 1000) {
+      prev.count = 0;
+      prev.windowStart = now;
+    }
+    prev.count += 1;
+    routeMap.set(sessionId, prev);
+    return prev.count;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Helper to log Spotify API usage with session/user info when available
+function logSpotifyCall(req, routeName) {
+  try {
+    const ts = new Date().toISOString();
+    const sessionId = req.session_id || req.cookies?.session_id || null;
+    let userLabel = 'unknown';
+    if (sessionId) {
+      try {
+        const s = sessionManager.getSession(sessionId);
+        if (s && s.user) userLabel = s.user.display_name || s.user.id || s.user.spotifyId || userLabel;
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    const key = routeName || (req.method + ' ' + req.path) || 'unknown_route';
+  const count = incrementCounter(key);
+  // track per-session counts for this route as well
+  if (sessionId) incrementSessionCounter(key, sessionId);
+
+  console.log(`[SPOTIFY_CALL] ${ts} route=${key} session=${sessionId || 'none'} user=${userLabel} ip=${req.ip || 'unknown'} count_last_min=${count}`);
+
+    // If an endpoint is called very frequently, emit a clearer warning
+    if (count > 50) {
+      console.warn(`[SPOTIFY_CALLS_HIGH] ${count} calls to ${key} in the last minute - investigate excessive usage`);
+    }
+  } catch (e) {
+    // fail-safe: do not throw from logging
+    console.warn('⚠️ Failed to log Spotify call debug info', e);
+  }
+}
+
 // Helper to call Spotify and handle 429 global backoff
 const callSpotify = async (axiosConfig) => {
   if (rateLimiter.isLimited()) {
@@ -40,6 +110,17 @@ const callSpotify = async (axiosConfig) => {
   }
 
   try {
+    // Lightweight logging for outgoing Spotify requests
+    try {
+      const fullUrl = axiosConfig && axiosConfig.url ? axiosConfig.url : 'unknown_url';
+      const spotifyPath = String(fullUrl).replace(/^https?:\/\/api\.spotify\.com/, '') || fullUrl;
+      const cnt = incrementCounter(`spotify:${spotifyPath}`);
+      console.log(`[SPOTIFY_REQ] ${new Date().toISOString()} ${axiosConfig.method || 'GET'} ${fullUrl} count_last_min=${cnt}`);
+      if (cnt > 100) console.warn(`[SPOTIFY_REQ_HIGH] ${cnt} requests to ${spotifyPath} in the last minute`);
+    } catch (e) {
+      // ignore logging errors
+    }
+
     return await axios(axiosConfig);
   } catch (err) {
     const status = err?.response?.status;
@@ -60,21 +141,93 @@ const callSpotify = async (axiosConfig) => {
   }
 };
 
+// Per-session cache for /playback-state to enforce strictly 1s update frequency
+const playbackStateCache = new Map(); // sessionId -> { ts, data }
+// Per-session in-flight coalescing: sessionId -> { ts, promise }
+const playbackInFlight = new Map();
+
 // Obtenir l'état de lecture actuel
 router.get('/playback-state', requireAuth, async (req, res) => {
+  // Note: we avoid logging/incrementing the global call counter for every incoming
+  // /playback-state because clients poll frequently and cache-hits should not
+  // be treated as Spotify API usage. We'll log only when we actually initiate
+  // an outgoing Spotify request (below) so callCounters reflect real outgoing load.
   try {
-    const response = await callSpotify({
-      method: 'get',
-      url: 'https://api.spotify.com/v1/me/player',
-      headers: { 'Authorization': 'Bearer ' + req.access_token }
-    });
-
-    if (response.status === 204) {
-      return res.json({ active: false });
+    // Enforce strict 1s per-session policy: if a recent cached response exists, return it
+    const sid = req.session_id || req.cookies?.session_id || 'anonymous';
+    const now = Date.now();
+    const cached = playbackStateCache.get(sid);
+    if (cached && (now - cached.ts) < 1000) {
+      // Return cached data immediately to avoid another outgoing Spotify call
+      if (typeof shouldLog === 'function' ? shouldLog(`playback_state_cache_hit_${sid}`) : true);
+      res.set('X-Cache', 'HIT');
+      return res.json(cached.data);
     }
 
-    return res.json(response.data);
+    // If there is already an in-flight fetch for this session, await it and return its result
+    const inFlight = playbackInFlight.get(sid);
+    if (inFlight && inFlight.promise) {
+      try {
+        // Await the existing promise so concurrent requests coalesce
+        await inFlight.promise;
+        const newCached = playbackStateCache.get(sid);
+        if (newCached) {
+          if (typeof shouldLog === 'function' ? shouldLog(`playback_state_cache_coalesced_${sid}`) : true) console.log(`ℹ️ playback-state coalesced for session ${sid}`);
+          res.set('X-Cache', 'HIT');
+          return res.json(newCached.data);
+        }
+        // If coalesced fetch didn't populate cache (failed), fallthrough to fresh fetch
+      } catch (e) {
+        // If the in-flight call failed, continue to try a fresh fetch below
+        console.warn('ℹ️ In-flight playback-state fetch failed, trying fresh fetch', e?.message || e);
+      }
+    }
+  } catch (e) {
+    // logging failure should not block
+    console.warn('⚠️ playback-state cache check failed', e);
+  }
+  // Before initiating an outgoing Spotify request, log the incoming route use
+  // (this will increment counters for the actual outgoing fetch below because
+  // logSpotifyCall also increments callCounters). We deliberately avoid logging
+  // at the top of the route to prevent cache-hit noise.
+  logSpotifyCall(req, '/playback-state');
+
+  // Initiate a single outgoing Spotify request for this session and make it visible to other concurrent callers
+  const sidForFetch = req.session_id || req.cookies?.session_id || 'anonymous';
+  let fetchPromise;
+  try {
+    fetchPromise = (async () => {
+      const response = await callSpotify({
+        method: 'get',
+        url: 'https://api.spotify.com/v1/me/player',
+        headers: { 'Authorization': 'Bearer ' + req.access_token }
+      });
+
+      if (response.status === 204) {
+        // Cache the empty response for this session
+        try {
+          playbackStateCache.set(sidForFetch, { ts: Date.now(), data: { active: false } });
+        } catch (e) { /* ignore cache write errors */ }
+        return { active: false };
+      }
+
+      // Cache the response for this session so subsequent requests within 1s return cached
+      try {
+        playbackStateCache.set(sidForFetch, { ts: Date.now(), data: response.data });
+      } catch (e) { /* ignore cache write errors */ }
+
+      return response.data;
+    })();
+
+    // register in-flight promise so concurrent callers wait on the same promise
+    playbackInFlight.set(sidForFetch, { ts: Date.now(), promise: fetchPromise });
+
+    // Await fetch and return result
+    const result = await fetchPromise;
+    try { playbackInFlight.delete(sidForFetch); } catch (e) {}
+    return res.json(result);
   } catch (error) {
+    try { playbackInFlight.delete(sidForFetch); } catch (e) {}
     if (error.status === 429) {
       return res.status(429).json({ error: 'Rate limited', ms: error.ms });
     }
@@ -90,6 +243,7 @@ router.get('/playback-state', requireAuth, async (req, res) => {
 
 // Lire/Pause
 router.put('/play', requireAuth, async (req, res) => {
+  logSpotifyCall(req, '/play');
   try {
     await callSpotify({
       method: 'put',
@@ -108,6 +262,7 @@ router.put('/play', requireAuth, async (req, res) => {
 });
 
 router.put('/pause', requireAuth, async (req, res) => {
+  logSpotifyCall(req, '/pause');
   try {
     await callSpotify({
       method: 'put',
@@ -126,6 +281,7 @@ router.put('/pause', requireAuth, async (req, res) => {
 
 // Chanson suivante/précédente
 router.post('/next', requireAuth, async (req, res) => {
+  logSpotifyCall(req, '/next');
   try {
     await callSpotify({
       method: 'post',
@@ -143,6 +299,7 @@ router.post('/next', requireAuth, async (req, res) => {
 });
 
 router.post('/previous', requireAuth, async (req, res) => {
+  logSpotifyCall(req, '/previous');
   try {
     await callSpotify({
       method: 'post',
@@ -165,6 +322,8 @@ router.post('/previous', requireAuth, async (req, res) => {
 // current party fetcher session (if one exists). That enables solo clients to
 // use the fetcher for searches when the UI allowed it.
 router.get('/search', async (req, res) => {
+  // Note: unauthenticated searches may use the fetcher session; log for debugging
+  logSpotifyCall(req, '/search');
   const { q, type = 'track', limit = 20 } = req.query;
 
   if (!q) {
@@ -220,6 +379,7 @@ router.get('/search', async (req, res) => {
 
 // Ajouter à la file d'attente
 router.post('/queue', requireAuth, async (req, res) => {
+  logSpotifyCall(req, '/queue');
   const { uri } = req.body;
   
   if (!uri) {
@@ -245,6 +405,7 @@ router.post('/queue', requireAuth, async (req, res) => {
 
 // Jouer le prochain titre depuis la queue locale
 router.post('/queue/next', requireAuth, async (req, res) => {
+  logSpotifyCall(req, '/queue/next');
   try {
     console.log('🎵 Demande de lecture du prochain titre de la queue locale');
     
@@ -289,6 +450,7 @@ router.post('/queue/next', requireAuth, async (req, res) => {
 
 // Obtenir les appareils disponibles
 router.get('/devices', requireAuth, async (req, res) => {
+  logSpotifyCall(req, '/devices');
   try {
     const response = await callSpotify({
       method: 'get',
@@ -307,6 +469,7 @@ router.get('/devices', requireAuth, async (req, res) => {
 
 // Jouer un track spécifique depuis la queue serveur
 router.post('/play-track', requireAuth, async (req, res) => {
+  logSpotifyCall(req, '/play-track');
   const { uri, device_id } = req.body;
   
   console.log('🎵 Tentative de lecture du track:', uri);
@@ -344,6 +507,7 @@ router.post('/play-track', requireAuth, async (req, res) => {
 
 // Changer d'appareil
 router.put('/device', requireAuth, async (req, res) => {
+  logSpotifyCall(req, '/device');
   const { device_ids, play } = req.body;
   
   try {
@@ -365,6 +529,7 @@ router.put('/device', requireAuth, async (req, res) => {
 
 // Contrôler le volume
 router.put('/volume', requireAuth, async (req, res) => {
+  logSpotifyCall(req, '/volume');
   const { volume_percent } = req.body;
   
   if (volume_percent === undefined || volume_percent < 0 || volume_percent > 100) {
@@ -390,6 +555,7 @@ router.put('/volume', requireAuth, async (req, res) => {
 
 // Changer la position de lecture (seek)
 router.put('/seek', requireAuth, async (req, res) => {
+  logSpotifyCall(req, '/seek');
   const { position_ms } = req.body;
   
   if (position_ms === undefined || position_ms < 0) {
@@ -414,3 +580,40 @@ router.put('/seek', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+
+// --- Debug endpoint for counters (restricted to localhost) ---
+// Note: placed after module.exports to avoid affecting normal exports ordering
+router.get('/internal/spotify-counters', (req, res) => {
+  const remote = req.ip || req.connection?.remoteAddress || '';
+  // Allow only localhost or 127.0.0.1
+  if (!remote || !(remote === '::1' || remote === '::ffff:127.0.0.1' || remote === '127.0.0.1' || remote === '::ffff:127.0.0.1')) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  try {
+    const reset = req.query.reset === '1' || req.query.reset === 'true';
+
+    const counters = {};
+    for (const [k, v] of callCounters.entries()) {
+      counters[k] = { count: v.count, windowStart: v.windowStart };
+    }
+
+    const sessionStats = {};
+    for (const [route, map] of sessionCounters.entries()) {
+      sessionStats[route] = {};
+      for (const [sid, obj] of map.entries()) {
+        sessionStats[route][sid] = { count: obj.count, windowStart: obj.windowStart };
+      }
+    }
+
+    if (reset) {
+      callCounters.clear();
+      sessionCounters.clear();
+    }
+
+    return res.json({ counters, sessionStats });
+  } catch (err) {
+    console.error('⚠️ Error serving internal/spotify-counters:', err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
