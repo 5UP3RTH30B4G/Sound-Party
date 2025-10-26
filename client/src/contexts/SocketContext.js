@@ -333,8 +333,6 @@ export const SocketProvider = ({ children, socket }) => {
               });
             }
         }, 500);
-      } else {
-        console.log('⚠️ Utilisateur déjà connecté, éviter la double connexion');
       }
     }
   }, [authenticated, user, socket, connectionStatus, connectedUsers]);

@@ -25,6 +25,8 @@ import {
 import { useAuth } from '../contexts/AuthContext';
 import { useSocket } from '../contexts/SocketContext';
 
+const debugLog = false; // Enable or disable debug logging
+
 const PlayerControls = () => {
   const { API_BASE_URL, refreshToken, user } = useAuth();
   const { 
@@ -82,10 +84,12 @@ const PlayerControls = () => {
             basePositionRef.current = data.progress_ms || 0;
             lastPlaybackUpdateRef.current = Date.now();
             // Visible log: baseline aligned after fetch
-            console.log('estimator baseline aligned from fetchPlaybackState', {
-              basePosition: basePositionRef.current,
-              lastPlaybackUpdate: lastPlaybackUpdateRef.current
-            });
+            if (debugLog) {
+              console.log('estimator baseline aligned from fetchPlaybackState', {
+                basePosition: basePositionRef.current,
+                lastPlaybackUpdate: lastPlaybackUpdateRef.current
+              });
+            }
             // mark estimator baseline as ready so the estimator effect can start
             try { setBaselineReady(true); } catch (e) {}
             // Immediate check using fetched progress (server-driven via API)
@@ -95,7 +99,10 @@ const PlayerControls = () => {
               const queueLength = activeState?.queue?.length || 0;
               const threshold = Math.max(0, duration - END_MARGIN_MS);
               const cooldownPassed = (now - (lastAutoPlayRequestRef.current || 0)) >= COOLDOWN_MS;
-              console.log('auto-skip immediate check (from fetch)', { pos, duration, threshold, cooldownPassed, lastAutoPlayRequest: lastAutoPlayRequestRef.current });
+
+              if (debugLog) {
+                console.log('auto-skip immediate check (from fetch)', { pos, duration, threshold, cooldownPassed, lastAutoPlayRequest: lastAutoPlayRequestRef.current });
+              }
               if (cooldownPassed && pos >= threshold) {
                 if (isSyncedWithParty) {
                   if (queueLength > 0) {
@@ -322,12 +329,14 @@ const PlayerControls = () => {
 
     // Log when effect runs so we can verify it's executing
     try {
-      console.log('estimator effect run', {
-        isPlaying,
-        currentTrackId: currentTrack?.id,
-        duration,
-        queueLength: activeState?.queue?.length
-      });
+      if (debugLog) {
+        console.log('estimator effect run', {
+          isPlaying,
+          currentTrackId: currentTrack?.id,
+          duration,
+          queueLength: activeState?.queue?.length
+        });
+      }
     } catch (e) {
       // ignore logging errors
     }
@@ -343,12 +352,14 @@ const PlayerControls = () => {
       basePositionRef.current = activeState.position || 0;
       lastPlaybackUpdateRef.current = Date.now();
       try {
-        console.log('estimator baseline aligned from activeState', {
-          activeStatePosition: activeState.position,
-          basePosition: basePositionRef.current,
-          lastPlaybackUpdate: lastPlaybackUpdateRef.current
-        });
-          try { setBaselineReady(true); } catch (e) {}
+        if (debugLog) {
+          console.log('estimator baseline aligned from activeState', {
+            activeStatePosition: activeState.position,
+            basePosition: basePositionRef.current,
+            lastPlaybackUpdate: lastPlaybackUpdateRef.current
+          });
+        }
+        try { setBaselineReady(true); } catch (e) {}
           // Immediate check using actual activeState.position (server-driven)
           try {
             const now = Date.now();
@@ -356,7 +367,9 @@ const PlayerControls = () => {
             const queueLength = activeState?.queue?.length || 0;
             const threshold = Math.max(0, duration - END_MARGIN_MS);
             const cooldownPassed = (now - (lastAutoPlayRequestRef.current || 0)) >= COOLDOWN_MS;
-            console.log('auto-skip immediate check (from activeState)', { pos, duration, threshold, cooldownPassed, lastAutoPlayRequest: lastAutoPlayRequestRef.current });
+            if (debugLog) {
+              console.log('auto-skip immediate check (from activeState)', { pos, duration, threshold, cooldownPassed, lastAutoPlayRequest: lastAutoPlayRequestRef.current });
+            }
             if (cooldownPassed && pos >= threshold) {
               // Only trigger auto-skip if there are tracks in the (shared) queue.
               // This prevents auto-skipping in solo mode when there's no queue.
@@ -381,12 +394,14 @@ const PlayerControls = () => {
     // and we've captured an initial baseline position (from socket or fetch)
     if (!isPlaying || !currentTrack || duration <= 0 || !baselineReady) {
       try {
-        console.log('estimator effect not starting — conditions not met', {
-          isPlaying,
-          currentTrackId: currentTrack?.id,
-          duration,
-          baselineReady
-        });
+        if (debugLog) {
+          console.log('estimator effect not starting — conditions not met', {
+            isPlaying,
+            currentTrackId: currentTrack?.id,
+            duration,
+            baselineReady
+          });
+        }
       } catch (e) {}
       return;
     }
@@ -461,11 +476,15 @@ const PlayerControls = () => {
 
     // Visible log indicating the estimator interval was started
     try {
-      console.log('estimator interval started', { TICK_MS, END_MARGIN_MS });
+      if (debugLog) {
+        console.log('estimator interval started', { TICK_MS, END_MARGIN_MS });
+      }
       // quick alive-check to detect if something clears the interval immediately after start
       try {
         setTimeout(() => {
-          console.log('estimator alive-check', { intervalExists: !!estimateIntervalRef.current });
+          if (debugLog) {
+            console.log('estimator alive-check', { intervalExists: !!estimateIntervalRef.current });
+          }
         }, 500);
       } catch (e) {}
     } catch (e) {}
@@ -795,57 +814,68 @@ const PlayerControls = () => {
           </Box>
 
           {/* Progress Bar + Volume */}
-          <Box sx={{ display: 'flex', alignItems: 'center', mt: 1 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', mt: 1, flexWrap: 'wrap' }}>
             <Typography variant="caption" sx={{ minWidth: 45 }}>
               {formatTime(position)}
             </Typography>
-            <Slider
-              size="small"
-              value={position}
-              min={0}
-              max={duration || 1}
-              onChange={handlePositionChange}
-              onChangeCommitted={handlePositionChangeCommitted}
-              sx={{ 
-                mx: 1,
-                '& .MuiSlider-thumb': {
-                  '&:hover, &.Mui-focusVisible': {
-                    boxShadow: '0 0 0 8px rgba(29, 185, 84, 0.16)'
+            <Box sx={{ flex: 1, minWidth: 0, mx: 1 }}>
+              <Slider
+                size="small"
+                value={position}
+                min={0}
+                max={duration || 1}
+                onChange={handlePositionChange}
+                onChangeCommitted={handlePositionChangeCommitted}
+                sx={{
+                  width: '100%',
+                  '& .MuiSlider-thumb': {
+                    '&:hover, &.Mui-focusVisible': {
+                      boxShadow: '0 0 0 8px rgba(29, 185, 84, 0.16)'
+                    }
                   }
-                }
-              }}
-            />
+                }}
+              />
+            </Box>
             <Typography variant="caption" sx={{ minWidth: 45 }}>
               {formatTime(duration)}
             </Typography>
             
-            {/* Volume & Devices */}
-            <VolumeUp sx={{ color: 'text.secondary', ml: 2 }} />
-            <Slider
-              size="small"
-              value={volume}
-              min={0}
-              max={100}
-              onChange={handleVolumeChange}
-              onChangeCommitted={handleVolumeChangeCommitted}
-              sx={{ 
-                width: 100,
-                mx: 1,
-                '& .MuiSlider-thumb': {
-                  '&:hover, &.Mui-focusVisible': {
-                    boxShadow: '0 0 0 8px rgba(29, 185, 84, 0.16)'
+            {/* Volume & Devices - responsive: on xs stack below the progress bar */}
+            <Box sx={{
+              display: 'flex',
+              alignItems: 'center',
+              ml: { xs: 0, sm: 2 },
+              mt: { xs: 1, sm: 0 },
+              width: { xs: '100%', sm: 'auto' },
+              justifyContent: { xs: 'flex-start', sm: 'flex-end' },
+              order: { xs: 2, sm: 0 }
+            }}>
+              <VolumeUp sx={{ color: 'text.secondary', mr: 1 }} />
+              <Slider
+                size="small"
+                value={volume}
+                min={0}
+                max={100}
+                onChange={handleVolumeChange}
+                onChangeCommitted={handleVolumeChangeCommitted}
+                sx={{ 
+                  width: { xs: '60%', sm: 100 },
+                  mx: 1,
+                  '& .MuiSlider-thumb': {
+                    '&:hover, &.Mui-focusVisible': {
+                      boxShadow: '0 0 0 8px rgba(29, 185, 84, 0.16)'
+                    }
                   }
-                }
-              }}
-            />
-            
-            <IconButton 
-              onClick={(e) => setDeviceMenuAnchor(e.currentTarget)}
-              size="small"
-              sx={{ color: 'text.secondary' }}
-            >
-              <Devices />
-            </IconButton>
+                }}
+              />
+              <IconButton 
+                onClick={(e) => setDeviceMenuAnchor(e.currentTarget)}
+                size="small"
+                sx={{ color: 'text.secondary' }}
+              >
+                <Devices />
+              </IconButton>
+            </Box>
 
             <Menu
               anchorEl={deviceMenuAnchor}
