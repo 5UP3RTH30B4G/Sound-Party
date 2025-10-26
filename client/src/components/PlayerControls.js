@@ -47,6 +47,7 @@ const PlayerControls = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [baselineReady, setBaselineReady] = useState(false);
   const [volume, setVolume] = useState(50);
   const [devices, setDevices] = useState([]);
   const [error, setError] = useState(null);
@@ -80,6 +81,37 @@ const PlayerControls = () => {
           try {
             basePositionRef.current = data.progress_ms || 0;
             lastPlaybackUpdateRef.current = Date.now();
+            // Visible log: baseline aligned after fetch
+            console.log('estimator baseline aligned from fetchPlaybackState', {
+              basePosition: basePositionRef.current,
+              lastPlaybackUpdate: lastPlaybackUpdateRef.current
+            });
+            // mark estimator baseline as ready so the estimator effect can start
+            try { setBaselineReady(true); } catch (e) {}
+            // Immediate check using fetched progress (server-driven via API)
+            try {
+              const now = Date.now();
+              const pos = data.progress_ms || 0;
+              const queueLength = activeState?.queue?.length || 0;
+              const threshold = Math.max(0, duration - END_MARGIN_MS);
+              const cooldownPassed = (now - (lastAutoPlayRequestRef.current || 0)) >= COOLDOWN_MS;
+              console.log('auto-skip immediate check (from fetch)', { pos, duration, threshold, cooldownPassed, lastAutoPlayRequest: lastAutoPlayRequestRef.current });
+              if (cooldownPassed && pos >= threshold) {
+                if (isSyncedWithParty) {
+                  if (queueLength > 0) {
+                    console.info('⏭️ auto-skip (party) immediate check (fetch) — emitting play_next_from_queue', { pos, duration });
+                    emitPlayNextFromQueue();
+                    lastAutoPlayRequestRef.current = now;
+                  } else {
+                    console.info('⏭️ auto-skip immediate (fetch) but party queue empty — not emitting', { pos, duration });
+                  }
+                } else {
+                  console.info('⏭️ auto-skip (solo) immediate check (fetch) — emitting playback next', { pos, duration });
+                  if (emitPlaybackControl) emitPlaybackControl('next');
+                  lastAutoPlayRequestRef.current = now;
+                }
+              }
+            } catch (e) { console.warn('auto-skip immediate check (fetch) failed:', e); }
           } catch (e) {
             // ignore if refs unavailable during initialization
           }
@@ -108,7 +140,7 @@ const PlayerControls = () => {
       console.error('Erreur lors de la récupération de l\'état de lecture:', error);
       setError('Erreur de connexion Spotify');
     }
-  }, [API_BASE_URL, refreshToken, emitPlaybackStateChange, rateLimited]);
+  }, [API_BASE_URL, refreshToken, emitPlaybackStateChange, rateLimited, isSyncedWithParty, activeState?.fetcher?.spotifyId, activeState?.fetcher?.name, user?.id, user?.display_name]);
 
   // When entering Party mode, clear pending timers/estimators to avoid
   // briefly showing local playback info before party state arrives.
@@ -127,6 +159,8 @@ const PlayerControls = () => {
       // also reset baseline refs
       basePositionRef.current = 0;
       lastPlaybackUpdateRef.current = Date.now();
+      // baseline is cleared when entering party mode (will be set again from partyState)
+      try { setBaselineReady(false); } catch (e) {}
     }
   }, [isSyncedWithParty]);
 
@@ -165,6 +199,11 @@ const PlayerControls = () => {
   const basePositionRef = useRef(position);
   const lastPlaybackUpdateRef = useRef(Date.now());
   const estimateIntervalRef = useRef(null);
+  // const lastAutoPlayedTrackRef = useRef(null); // unused - kept commented for future use
+  // Auto-skip tuning
+  const END_MARGIN_MS = 1000; // 1 second
+  const COOLDOWN_MS = 2000; // avoid double-emits in quick succession
+  const TICK_MS = 250; // check more frequently for accuracy
 
   const performThrottledFetch = useCallback(() => {
     if (!API_BASE_URL || !refreshToken || rateLimited) return;
@@ -229,7 +268,7 @@ const PlayerControls = () => {
         scheduledRef.current = null;
       }
     };
-  }, [fetchPlaybackState, fetchDevices, rateLimited, activeState, user, performThrottledFetch, serverRateLimitedMs]);
+  }, [fetchPlaybackState, fetchDevices, rateLimited, activeState, user, performThrottledFetch, serverRateLimitedMs, isSyncedWithParty]);
 
   // Synchroniser avec les événements socket.
   // En mode Party, n'afficher une piste actuelle que si elle provient de la file d'attente partagée.
@@ -268,18 +307,29 @@ const PlayerControls = () => {
         console.warn('Erreur en récupérant l\'état après sortie du mode Party:', err);
       }
     }
-  }, [isSyncedWithParty, fetchPlaybackState]);
+  }, [isSyncedWithParty, fetchPlaybackState, activeState?.fetcher?.spotifyId, activeState?.fetcher?.name]);
+  // Note: include activeState.fetcher identifiers because fetchPlaybackState logic
+  // uses them to decide whether this client is allowed to poll the Spotify API.
 
   // Estimate current position using the last known playbackState position + elapsed time
   useEffect(() => {
-    const END_MARGIN_MS = 2500;
-    const COOLDOWN_MS = 5000;
-    const TICK_MS = 500;
 
     // Clean previous interval
     if (estimateIntervalRef.current) {
       clearInterval(estimateIntervalRef.current);
       estimateIntervalRef.current = null;
+    }
+
+    // Log when effect runs so we can verify it's executing
+    try {
+      console.log('estimator effect run', {
+        isPlaying,
+        currentTrackId: currentTrack?.id,
+        duration,
+        queueLength: activeState?.queue?.length
+      });
+    } catch (e) {
+      // ignore logging errors
     }
 
     // When playbackState updates, capture its baseline position and timestamp
@@ -292,41 +342,151 @@ const PlayerControls = () => {
     if (canUsePlaybackState && activeState && activeState.position !== undefined) {
       basePositionRef.current = activeState.position || 0;
       lastPlaybackUpdateRef.current = Date.now();
+      try {
+        console.log('estimator baseline aligned from activeState', {
+          activeStatePosition: activeState.position,
+          basePosition: basePositionRef.current,
+          lastPlaybackUpdate: lastPlaybackUpdateRef.current
+        });
+          try { setBaselineReady(true); } catch (e) {}
+          // Immediate check using actual activeState.position (server-driven)
+          try {
+            const now = Date.now();
+            const pos = activeState.position || 0;
+            const queueLength = activeState?.queue?.length || 0;
+            const threshold = Math.max(0, duration - END_MARGIN_MS);
+            const cooldownPassed = (now - (lastAutoPlayRequestRef.current || 0)) >= COOLDOWN_MS;
+            console.log('auto-skip immediate check (from activeState)', { pos, duration, threshold, cooldownPassed, lastAutoPlayRequest: lastAutoPlayRequestRef.current });
+            if (cooldownPassed && pos >= threshold) {
+              // Only trigger auto-skip if there are tracks in the (shared) queue.
+              // This prevents auto-skipping in solo mode when there's no queue.
+              if (queueLength > 0) {
+                try {
+                  console.info('⏭️ auto-skip immediate check — emitting play_next_from_queue', { pos, duration });
+                  // set cooldown before emitting to avoid re-entrancy
+                  lastAutoPlayRequestRef.current = now;
+                  if (emitPlayNextFromQueue) emitPlayNextFromQueue();
+                } catch (e) {
+                  console.warn('auto-skip emit failed:', e);
+                }
+              } else {
+                console.info('⏭️ auto-skip immediate but queue empty — not emitting', { pos, duration });
+              }
+            }
+          } catch (e) { console.warn('auto-skip immediate check failed:', e); }
+      } catch (e) {}
     }
 
     // Only run estimator when playback is active and we have a current track
-    if (!isPlaying || !currentTrack || duration <= 0) {
+    // and we've captured an initial baseline position (from socket or fetch)
+    if (!isPlaying || !currentTrack || duration <= 0 || !baselineReady) {
+      try {
+        console.log('estimator effect not starting — conditions not met', {
+          isPlaying,
+          currentTrackId: currentTrack?.id,
+          duration,
+          baselineReady
+        });
+      } catch (e) {}
       return;
     }
 
-    estimateIntervalRef.current = setInterval(() => {
+  estimateIntervalRef.current = setInterval(() => {
+      // Tick-level log to confirm the interval is firing and what values are used
+      try {
+        const debugNow = Date.now();
+        console.log('estimator tick', {
+          now: debugNow,
+          basePosition: basePositionRef.current,
+          lastPlaybackUpdate: lastPlaybackUpdateRef.current,
+          activeStatePosition: activeState?.position,
+          // duration & isPlaying captured from closure
+          duration,
+          isPlaying
+        });
+      } catch (e) {}
       try {
         const now = Date.now();
         const elapsed = Math.max(0, now - (lastPlaybackUpdateRef.current || now));
         const estimated = Math.min(duration, (basePositionRef.current || 0) + elapsed);
         setPosition(estimated);
+        // Debug: also log formatted current time / total duration for easier reading
+        try {
+          if (typeof formatTime === 'function') {
+            console.log(`Playback time: ${formatTime(estimated)} / ${formatTime(duration)}`);
+          }
+        } catch (e) {
+          // ignore formatting errors
+        }
 
-        // If there is a queue, trigger next when within margin (with cooldown)
-        if (activeState && activeState.queue && activeState.queue.length > 0) {
-          if (now - (lastAutoPlayRequestRef.current || 0) >= COOLDOWN_MS) {
-            if (estimated >= (duration - END_MARGIN_MS)) {
-              emitPlayNextFromQueue();
-              lastAutoPlayRequestRef.current = now;
+        // Evaluate auto-skip conditions using estimated and margins.
+        try {
+          const queueLength = activeState?.queue?.length || 0;
+          const threshold = Math.max(0, duration - END_MARGIN_MS);
+          console.log('estimator:', { estimated, duration, threshold, queueLength, lastAutoPlayRequest: lastAutoPlayRequestRef.current, now });
+
+          const cooldownPassed = (now - (lastAutoPlayRequestRef.current || 0)) >= COOLDOWN_MS;
+          const closeToEnd = estimated >= threshold;
+
+          if (cooldownPassed && closeToEnd) {
+            if (isSyncedWithParty) {
+              // Party mode: only emit play_next_from_queue when the shared queue has items
+              if (queueLength > 0) {
+                console.info('⏭️ auto-skip (party) threshold reached — emitting play_next_from_queue', { estimated, duration });
+                emitPlayNextFromQueue();
+                lastAutoPlayRequestRef.current = now;
+              } else {
+                console.info('⏭️ auto-skip threshold reached but party queue is empty — not emitting', { estimated, duration });
+                // no-op for party when no queued tracks
+              }
+            } else {
+              // Solo mode: delegate to the server to advance playback (keeps behavior consistent)
+              try {
+                console.info('⏭️ auto-skip (solo) threshold reached — emitting playback next', { estimated, duration });
+                if (emitPlaybackControl) emitPlaybackControl('next');
+                lastAutoPlayRequestRef.current = now;
+              } catch (e) {
+                console.warn('Failed to emit playback next during auto-skip (solo):', e);
+              }
             }
           }
+        } catch (e) {
+          // don't let logging or minor errors break the estimator
+          console.warn('Error evaluating auto-skip conditions:', e);
         }
       } catch (err) {
         console.warn('Erreur estimation position:', err);
       }
     }, TICK_MS);
 
+    // Visible log indicating the estimator interval was started
+    try {
+      console.log('estimator interval started', { TICK_MS, END_MARGIN_MS });
+      // quick alive-check to detect if something clears the interval immediately after start
+      try {
+        setTimeout(() => {
+          console.log('estimator alive-check', { intervalExists: !!estimateIntervalRef.current });
+        }, 500);
+      } catch (e) {}
+    } catch (e) {}
+
     return () => {
+      try {
+        console.log('estimator cleanup — clearing interval if present', {
+          isPlaying,
+          currentTrackId: currentTrack?.id,
+          duration,
+          baselineReady,
+          intervalExists: !!estimateIntervalRef.current
+        });
+      } catch (e) {}
       if (estimateIntervalRef.current) {
         clearInterval(estimateIntervalRef.current);
         estimateIntervalRef.current = null;
       }
+      try { console.log('estimator interval cleared'); } catch (e) {}
     };
-  }, [isPlaying, currentTrack, duration, playbackState, emitPlayNextFromQueue]);
+  }, [isPlaying, currentTrack, duration, playbackState, partyState, isSyncedWithParty, emitPlayNextFromQueue, baselineReady]);
 
   // Écouter l'événement CustomEvent 'autoPlayTrackFromQueue' dispatché par SocketContext
   useEffect(() => {
@@ -380,7 +540,7 @@ const PlayerControls = () => {
 
     window.addEventListener('autoPlayTrackFromQueue', handler);
     return () => window.removeEventListener('autoPlayTrackFromQueue', handler);
-  }, [API_BASE_URL, fetchPlaybackState, playbackState, user, emitTrackRemovedFromQueue]);
+  }, [API_BASE_URL, fetchPlaybackState, playbackState, user, emitTrackRemovedFromQueue, activeState, emitPlaybackControl, user?.id, user?.display_name, user?.product]);
 
   const handlePlayPause = async () => {
     if (serverRateLimitedMs && serverRateLimitedMs > 0) return;

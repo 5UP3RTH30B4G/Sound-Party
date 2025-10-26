@@ -34,9 +34,6 @@ export const SocketProvider = ({ children, socket }) => {
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
 
   useEffect(() => {
-    console.log('🔌 SocketContext - Gestion de la connexion socket');
-    console.log('📊 État actuel:', { socketConnected: socket?.connected, authenticated, user: user?.display_name });
-    
     if (!socket) {
       console.log('❌ Pas de socket disponible');
       return;
@@ -149,11 +146,6 @@ export const SocketProvider = ({ children, socket }) => {
         }
       } catch (err) {
         console.warn('⚠️ Erreur lors de la mise à jour de la queue côté client:', err);
-      }
-      
-      // Si c'est une suppression automatique, émettre un message spécial
-      if (data.autoRemoved && data.removedTrack) {
-        addSystemMessage(`📋 "${data.removedTrack.name}" supprimée automatiquement de la queue`, 'info');
       }
     });
 

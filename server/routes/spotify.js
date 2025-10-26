@@ -67,6 +67,8 @@ function incrementSessionCounter(routeKey, sessionId) {
   }
 }
 
+const debuglog = false; // set to true to enable debug logging
+
 // Helper to log Spotify API usage with session/user info when available
 function logSpotifyCall(req, routeName) {
   try {
@@ -87,10 +89,12 @@ function logSpotifyCall(req, routeName) {
   // track per-session counts for this route as well
   if (sessionId) incrementSessionCounter(key, sessionId);
 
-  console.log(`[SPOTIFY_CALL] ${ts} route=${key} session=${sessionId || 'none'} user=${userLabel} ip=${req.ip || 'unknown'} count_last_min=${count}`);
+    if (debuglog) {
+      console.log(`[SPOTIFY_CALL] ${ts} route=${key} session=${sessionId || 'none'} user=${userLabel} ip=${req.ip || 'unknown'} count_last_min=${count}`);
+    }
 
     // If an endpoint is called very frequently, emit a clearer warning
-    if (count > 50) {
+    if (count > 70) {
       console.warn(`[SPOTIFY_CALLS_HIGH] ${count} calls to ${key} in the last minute - investigate excessive usage`);
     }
   } catch (e) {
@@ -115,7 +119,9 @@ const callSpotify = async (axiosConfig) => {
       const fullUrl = axiosConfig && axiosConfig.url ? axiosConfig.url : 'unknown_url';
       const spotifyPath = String(fullUrl).replace(/^https?:\/\/api\.spotify\.com/, '') || fullUrl;
       const cnt = incrementCounter(`spotify:${spotifyPath}`);
-      console.log(`[SPOTIFY_REQ] ${new Date().toISOString()} ${axiosConfig.method || 'GET'} ${fullUrl} count_last_min=${cnt}`);
+      if (debuglog) {
+        console.log(`[SPOTIFY_REQ] ${new Date().toISOString()} ${axiosConfig.method || 'GET'} ${fullUrl} count_last_min=${cnt}`);
+      }
       if (cnt > 100) console.warn(`[SPOTIFY_REQ_HIGH] ${cnt} requests to ${spotifyPath} in the last minute`);
     } catch (e) {
       // ignore logging errors

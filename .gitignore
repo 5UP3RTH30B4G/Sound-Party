@@ -231,3 +231,6 @@ nginx-client.conf
 # PM2 configuration files
 ecosystem.config.js
 ecosystem.config.js
+
+# Other
+bug.txt

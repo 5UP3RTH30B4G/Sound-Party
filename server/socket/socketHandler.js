@@ -21,6 +21,13 @@ let currentPlaybackState = {
   ownerSpotifyId: null
 };
 
+// Auto-skip cooldowns to prevent duplicate rapid plays (in ms)
+const AUTO_SKIP_COOLDOWN_MS = 1500; // 1.5s
+const lastAutoPlayTimestamps = {
+  party: 0,
+  solo: 0
+};
+
 // Instance IO pour les méthodes utilitaires
 let ioInstance = null;
 
@@ -303,24 +310,55 @@ const socketHandler = (io) => {
 
     // Événement pour jouer automatiquement la prochaine chanson de la queue
     socket.on('play_next_from_queue', async () => {
-      const user = connectedUsers.get(socket.id);
-      if (!user) return;
+      // Allow play_next_from_queue even if the user hasn't yet been registered
+      // (clients may emit this right after socket connect before server-side
+      // user registration completes). Use a sensible fallback queue selection
+      // and log clearly to aid debugging.
+      let user = connectedUsers.get(socket.id);
+      if (!user) {
+        if (typeof shouldLog === 'function' ? shouldLog(`play_next_unknown_socket_${socket.id}`, 5000) : true) console.warn(`⚠️ play_next_from_queue received from unknown socket ${socket.id} - using fallback queue selection`);
+        // pick party queue if non-empty, otherwise solo queue
+        const fallbackIsParty = (partyPlaybackState && partyPlaybackState.queue && partyPlaybackState.queue.length > 0);
+        user = { name: `socket:${socket.id}`, isSyncedWithParty: fallbackIsParty, sessionId: null, spotifyId: null, premium: false };
+      }
 
-      if (!currentPlaybackState.queue || currentPlaybackState.queue.length === 0) return;
-      const nextTrack = currentPlaybackState.queue[0];
-      console.log(`🎵 Demande play_next_from_queue par ${user.name} pour: ${nextTrack.name}`);
+      // Choose the correct queue based on whether the requester is synced with the party
+      const isPartyRequest = !!user.isSyncedWithParty;
+      const targetQueue = isPartyRequest ? partyPlaybackState.queue : currentPlaybackState.queue;
+      const targetState = isPartyRequest ? partyPlaybackState : currentPlaybackState;
+
+        // Deduplicate rapid auto-play requests per-queue to avoid duplicate next/play calls
+        try {
+          const key = isPartyRequest ? 'party' : 'solo';
+          const now = Date.now();
+          if (now - (lastAutoPlayTimestamps[key] || 0) < AUTO_SKIP_COOLDOWN_MS) {
+            if (typeof shouldLog === 'function' ? shouldLog('play_next_debounced') : true) console.log(`ℹ️ Ignoring play_next_from_queue (debounced) for ${key} queue`);
+            return;
+          }
+          // reserve the timeslot immediately to avoid races
+          lastAutoPlayTimestamps[key] = now;
+        } catch (e) {
+          // ignore errors
+        }
+
+      if (!targetQueue || targetQueue.length === 0) {
+        if (typeof shouldLog === 'function' ? shouldLog('play_next_empty_queue') : true) console.log(`ℹ️ play_next_from_queue: no tracks in ${isPartyRequest ? 'party' : 'solo'} queue`);
+        return;
+      }
+      const nextTrack = targetQueue[0];
+      console.log(`🎵 Demande play_next_from_queue par ${user.name} pour: ${nextTrack.name} (isParty: ${isPartyRequest})`);
 
       // Try to resolve a session to perform the play server-side (prefer fetcher, then requester)
       let sessionIdToUse = null;
-      if (currentPlaybackState.fetcher && currentPlaybackState.fetcher.sessionId) sessionIdToUse = currentPlaybackState.fetcher.sessionId;
+      if (targetState.fetcher && targetState.fetcher.sessionId) sessionIdToUse = targetState.fetcher.sessionId;
       if (!sessionIdToUse && user.sessionId) sessionIdToUse = user.sessionId;
       if (!sessionIdToUse) {
         try {
           const sessionManager = require('../utils/sessionManager');
           const sessions = sessionManager.getActiveSessions();
           // prefer fetcher match
-          if (currentPlaybackState.fetcher && currentPlaybackState.fetcher.spotifyId) {
-            const match = sessions.find(s => s.user && (s.user.id === currentPlaybackState.fetcher.spotifyId || s.user.spotifyId === currentPlaybackState.fetcher.spotifyId));
+          if (targetState.fetcher && targetState.fetcher.spotifyId) {
+            const match = sessions.find(s => s.user && (s.user.id === targetState.fetcher.spotifyId || s.user.spotifyId === targetState.fetcher.spotifyId));
             if (match) sessionIdToUse = match.sessionId;
           }
           if (!sessionIdToUse) {
@@ -344,15 +382,19 @@ const socketHandler = (io) => {
           if (resp && resp.ok) {
             console.log(`✅ play_next_from_queue: Played ${nextTrack.name} using session ${sessionIdToUse}`);
             // Remove track from queue and broadcast
-            const removed = currentPlaybackState.queue.shift();
-            io.emit('queue_updated', { queue: currentPlaybackState.queue, autoRemoved: true, removedTrack: removed });
+            const removed = targetQueue.shift();
+            io.emit('queue_updated', { queue: targetQueue, autoRemoved: true, removedTrack: removed, isParty: isPartyRequest });
 
             // Update playback state
-            currentPlaybackState.currentTrack = nextTrack;
-            currentPlaybackState.isPlaying = true;
-            currentPlaybackState.position = 0;
-            currentPlaybackState.ownerSpotifyId = user.spotifyId || (currentPlaybackState.fetcher && currentPlaybackState.fetcher.spotifyId) || null;
-            broadcastPlaybackState();
+            targetState.currentTrack = nextTrack;
+            targetState.isPlaying = true;
+            targetState.position = 0;
+            targetState.ownerSpotifyId = user.spotifyId || (targetState.fetcher && targetState.fetcher.spotifyId) || null;
+            if (isPartyRequest) {
+              broadcastPartyState();
+            } else {
+              broadcastPlaybackState();
+            }
             return;
           } else {
             const txt = resp ? (await resp.text()) : 'no response';
@@ -466,6 +508,16 @@ const socketHandler = (io) => {
 
       // Special-case early attempt: if 'next' and we have a server queue, try server-side play
       if (action.type === 'next' && targetState.queue && targetState.queue.length > 0) {
+        // debounce rapid 'next' requests for this queue
+        try {
+          const key = isPartyMode ? 'party' : 'solo';
+          const now4 = Date.now();
+          if (now4 - (lastAutoPlayTimestamps[key] || 0) < AUTO_SKIP_COOLDOWN_MS) {
+            if (typeof shouldLog === 'function' ? shouldLog('next_debounced') : true) console.log(`ℹ️ Ignoring playback 'next' (debounced) for ${key} queue`);
+            return;
+          }
+          lastAutoPlayTimestamps[key] = now4;
+        } catch (e) {}
         // prefer fetcher session if available
         let trySession = targetState.fetcher && targetState.fetcher.sessionId ? targetState.fetcher.sessionId : null;
         if (!trySession && user && user.sessionId) trySession = user.sessionId;
@@ -498,7 +550,7 @@ const socketHandler = (io) => {
 
             if (playRes && playRes.ok) {
               const removed = targetState.queue.shift();
-              io.emit('queue_updated', { queue: targetState.queue, autoRemoved: true, removedTrack: removed });
+              io.emit('queue_updated', { queue: targetState.queue, autoRemoved: true, removedTrack: removed, isParty: isPartyMode });
               targetState.currentTrack = nextTrack;
               targetState.isPlaying = true;
               targetState.position = 0;
@@ -613,7 +665,7 @@ const socketHandler = (io) => {
             if (playRes && playRes.ok) {
               // Remove from queue and broadcast
               const removed = targetState.queue.shift();
-              io.emit('queue_updated', { queue: targetState.queue, autoRemoved: true, removedTrack: removed });
+              io.emit('queue_updated', { queue: targetState.queue, autoRemoved: true, removedTrack: removed, isParty: isPartyMode });
 
               // Update server playback state
               targetState.currentTrack = nextTrack;
@@ -734,7 +786,8 @@ const socketHandler = (io) => {
           io.emit('queue_updated', {
             queue: targetState.queue,
             autoRemoved: true,
-            removedTrack: removedTrack
+            removedTrack: removedTrack,
+            isParty: isPartyMode
           });
         }
 
@@ -837,7 +890,8 @@ const socketHandler = (io) => {
               io.emit('queue_updated', {
                 queue: currentPlaybackState.queue,
                 autoRemoved: true,
-                removedTrack: removedTrack
+                removedTrack: removedTrack,
+                isParty: false
               });
             }
           } else {
@@ -863,15 +917,19 @@ const socketHandler = (io) => {
         return;
       }
 
-      // La file d'attente fonctionne seulement en mode Party
-      if (!user.isSyncedWithParty) {
-        console.log(`⚠️ ${user.name} a tenté d'ajouter une piste en mode Solo (non autorisé)`);
-        socket.emit('control_error', { reason: 'La file d\'attente est disponible uniquement en mode Party' });
+      const hasAnyFetcher = (partyPlaybackState && partyPlaybackState.fetcher) || (currentPlaybackState && currentPlaybackState.fetcher);
+      if (!user.isSyncedWithParty && !hasAnyFetcher) {
+        console.log(`⚠️ ${user.name} a tenté d'ajouter une piste en mode Solo (non autorisé, aucun fetcher disponible)`);
+        socket.emit('control_error', { reason: 'La file d\'attente est disponible uniquement en mode Party tant qu\'il n\'y a pas de fetcher actif' });
         return;
       }
 
-      console.log(`➕ ${user.name} a ajouté "${trackData.name}" à la file d'attente party`);
+      if (!user.isSyncedWithParty && hasAnyFetcher) {
+        // Autorisé: utilisateur en Solo mais un fetcher existe, on le laisse ajouter à la queue.
+        if (typeof shouldLog === 'function' ? shouldLog(`queue_add_allowed_solo_with_fetcher_${socket.id}`) : true) console.log(`ℹ️ ${user.name} (Solo) ajoute une piste parce qu'un fetcher est présent`);
+      }
 
+      // Build queue item metadata
       const queueItem = {
         ...trackData,
         addedBy: user.name,
@@ -879,99 +937,203 @@ const socketHandler = (io) => {
         id: Date.now() + Math.random() // ID unique simple
       };
 
-      // Ajouter à la file d'attente party
-      partyPlaybackState.queue.push(queueItem);
+      // Decide whether this belongs to party queue or solo (current) queue
+      const isPartyAdd = !!user.isSyncedWithParty;
+      if (isPartyAdd) {
+        console.log(`➕ ${user.name} a ajouté "${trackData.name}" à la file d'attente party`);
+        partyPlaybackState.queue.push(queueItem);
 
-      // Informer tous les clients de la mise à jour de la queue
-      io.emit('queue_updated', {
-        queue: partyPlaybackState.queue,
-        addedTrack: queueItem,
-        addedBy: user.name
-      });
+        if (typeof shouldLog === 'function' ? shouldLog('party_queue_size_log') : true) console.log(`ℹ️ Queue party taille après ajout: ${partyPlaybackState.queue.length}`);
 
-      // Message dans le chat
-      io.emit('queue_message', {
-        user: user.name,
-        message: `a ajouté "${trackData.name}" à la file d'attente`,
-        timestamp: new Date()
-      });
+        // Inform all clients about the updated party queue
+        io.emit('queue_updated', {
+          queue: partyPlaybackState.queue,
+          addedTrack: queueItem,
+          addedBy: user.name,
+          isParty: true
+        });
 
-      // If nothing is playing in party, attempt to auto-play the newly queued track
-      try {
-        if (!partyPlaybackState.currentTrack || !partyPlaybackState.isPlaying) {
-          const nextTrack = partyPlaybackState.queue[0];
-          if (nextTrack) {
-            console.log(`ℹ️ Aucune lecture party en cours, tentative d'auto-play pour ${nextTrack.name} ajouté par ${user.name}`);
+        io.emit('queue_message', {
+          user: user.name,
+          message: `a ajouté "${trackData.name}" à la file d'attente`,
+          timestamp: new Date()
+        });
 
-            // Resolve a session id to use: prefer fetcher.sessionId, else the user who queued
-            let sessionIdToUse = null;
-            if (partyPlaybackState.fetcher && partyPlaybackState.fetcher.sessionId) {
-              sessionIdToUse = partyPlaybackState.fetcher.sessionId;
-            }
-            if (!sessionIdToUse) {
-              sessionIdToUse = user.sessionId;
-            }
+        // If nothing is playing in party, attempt to auto-play the newly queued track (same logic as before)
+        try {
+          if (!partyPlaybackState.currentTrack || !partyPlaybackState.isPlaying) {
+            const nextTrack = partyPlaybackState.queue[0];
+            if (nextTrack) {
+              console.log(`ℹ️ Aucune lecture party en cours, tentative d'auto-play pour ${nextTrack.name} ajouté par ${user.name}`);
 
-            if (!sessionIdToUse) {
-              // try to lookup in session manager
-              try {
-                const sessionManager = require('../utils/sessionManager');
-                const sessions = sessionManager.getActiveSessions();
-                const match = sessions.find(s => s.user && (s.user.id === user.id || s.user.id === user.spotifyId || s.user.display_name === user.name));
-                if (match) sessionIdToUse = match.sessionId;
-              } catch (err) {
-                console.warn('⚠️ Impossible de résoudre session pour auto-play après track_queued:', err);
+              // Resolve a session id to use: prefer fetcher.sessionId, else the user who queued
+              let sessionIdToUse = null;
+              if (partyPlaybackState.fetcher && partyPlaybackState.fetcher.sessionId) {
+                sessionIdToUse = partyPlaybackState.fetcher.sessionId;
               }
-            }
+              if (!sessionIdToUse) {
+                sessionIdToUse = user.sessionId;
+              }
 
-            if (!sessionIdToUse) {
-              console.log('⚠️ Aucun session_id disponible pour auto-play du track ajouté');
-            } else {
-              // Call internal API to play the track using the resolved session cookie
-              const API_BASE = process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT || 5000}`;
-              (async () => {
+              if (!sessionIdToUse) {
+                // try to lookup in session manager
                 try {
-                  const axios = require('axios');
-                  const response = await axios.post(`${API_BASE.replace(/\/$/, '')}/api/spotify/play-track`, { uri: nextTrack.uri }, {
-                    headers: { 'Content-Type': 'application/json', 'Cookie': `session_id=${sessionIdToUse}` }
-                  });
+                  const sessionManager = require('../utils/sessionManager');
+                  const sessions = sessionManager.getActiveSessions();
+                  const match = sessions.find(s => s.user && (s.user.id === user.id || s.user.id === user.spotifyId || s.user.display_name === user.name));
+                  if (match) sessionIdToUse = match.sessionId;
+                } catch (err) {
+                  console.warn('⚠️ Impossible de résoudre session pour auto-play après track_queued (party):', err);
+                }
+              }
 
-                  if (response.status >= 200 && response.status < 300) {
-                    console.log(`✅ Auto-play party démarré pour ${nextTrack.name}`);
-                    // Remove from party queue locally
-                    const trackIndex = partyPlaybackState.queue.findIndex(q => q.uri === nextTrack.uri);
-                    if (trackIndex !== -1) {
-                      const removedTrack = partyPlaybackState.queue.splice(trackIndex, 1)[0];
-                      io.emit('queue_updated', {
-                        queue: partyPlaybackState.queue,
-                        autoRemoved: true,
-                        removedTrack: removedTrack
-                      });
+              if (!sessionIdToUse) {
+                console.log('⚠️ Aucun session_id disponible pour auto-play du track ajouté (party)');
+              } else {
+                // Call internal API to play the track using the resolved session cookie
+                const API_BASE = process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT || 5000}`;
+                (async () => {
+                  try {
+                    const axios = require('axios');
+                    const response = await axios.post(`${API_BASE.replace(/\/$/, '')}/api/spotify/play-track`, { uri: nextTrack.uri }, {
+                      headers: { 'Content-Type': 'application/json', 'Cookie': `session_id=${sessionIdToUse}` }
+                    });
+
+                    if (response.status >= 200 && response.status < 300) {
+                      console.log(`✅ Auto-play party démarré pour ${nextTrack.name}`);
+                      // Remove from party queue locally
+                      const trackIndex = partyPlaybackState.queue.findIndex(q => q.uri === nextTrack.uri);
+                      if (trackIndex !== -1) {
+                        const removedTrack = partyPlaybackState.queue.splice(trackIndex, 1)[0];
+                        io.emit('queue_updated', {
+                          queue: partyPlaybackState.queue,
+                          autoRemoved: true,
+                          removedTrack: removedTrack,
+                          isParty: true
+                        });
+                      }
+                      if (typeof shouldLog === 'function' ? shouldLog('party_queue_size_after_autoplay') : true) console.log(`ℹ️ Queue party taille après autoplay remove: ${partyPlaybackState.queue.length}`);
+                      // Update party playback state
+                      partyPlaybackState.currentTrack = nextTrack;
+                      partyPlaybackState.isPlaying = true;
+                      partyPlaybackState.position = 0;
+                      partyPlaybackState.ownerSpotifyId = user.spotifyId;
+                      // Broadcast party state
+                      broadcastPartyState();
+                    } else {
+                      const txt = response.data || `HTTP ${response.status}`;
+                      console.warn('⚠️ Auto-play party failed:', txt);
+                      // Notify specific user who queued that auto-play failed
+                      io.to(socket.id).emit('auto_play_failed', { error: txt });
                     }
-                    // Update party playback state
-                    partyPlaybackState.currentTrack = nextTrack;
-                    partyPlaybackState.isPlaying = true;
-                    partyPlaybackState.position = 0;
-                    partyPlaybackState.ownerSpotifyId = user.spotifyId;
-                    // Broadcast party state
-                    broadcastPartyState();
-                  } else {
-                    const txt = response.data || `HTTP ${response.status}`;
-                    console.warn('⚠️ Auto-play party failed:', txt);
-                    // Notify specific user who queued that auto-play failed
+                  } catch (err) {
+                    const txt = err?.response?.data || err.message;
+                    console.error('❌ Erreur lors de l\'appel interne pour auto-play party:', txt);
                     io.to(socket.id).emit('auto_play_failed', { error: txt });
                   }
-                } catch (err) {
-                  const txt = err?.response?.data || err.message;
-                  console.error('❌ Erreur lors de l\'appel interne pour auto-play party:', txt);
-                  io.to(socket.id).emit('auto_play_failed', { error: txt });
-                }
-              })();
+                })();
+              }
             }
           }
+        } catch (err) {
+          console.warn('⚠️ Erreur dans auto-play after track_queued (party):', err);
         }
-      } catch (err) {
-        console.warn('⚠️ Erreur dans auto-play after track_queued:', err);
+      } else {
+        // Solo add -> push to currentPlaybackState.queue (solo queue)
+        console.log(`➕ ${user.name} a ajouté "${trackData.name}" à la file d'attente solo`);
+        currentPlaybackState.queue.push(queueItem);
+
+        if (typeof shouldLog === 'function' ? shouldLog('solo_queue_size_log') : true) console.log(`ℹ️ Queue solo taille après ajout: ${currentPlaybackState.queue.length}`);
+
+        io.emit('queue_updated', {
+          queue: currentPlaybackState.queue,
+          addedTrack: queueItem,
+          addedBy: user.name,
+          isParty: false
+        });
+
+        io.emit('queue_message', {
+          user: user.name,
+          message: `a ajouté "${trackData.name}" à la file d'attente solo`,
+          timestamp: new Date()
+        });
+
+        // If nothing is playing in solo, attempt to auto-play the newly queued track
+        try {
+          if (!currentPlaybackState.currentTrack || !currentPlaybackState.isPlaying) {
+            const nextTrack = currentPlaybackState.queue[0];
+            if (nextTrack) {
+              console.log(`ℹ️ Aucune lecture solo en cours, tentative d'auto-play pour ${nextTrack.name} ajouté par ${user.name}`);
+
+              // Resolve a session id to use: prefer fetcher.sessionId, else the user who queued
+              let sessionIdToUse = null;
+              if (currentPlaybackState.fetcher && currentPlaybackState.fetcher.sessionId) {
+                sessionIdToUse = currentPlaybackState.fetcher.sessionId;
+              }
+              if (!sessionIdToUse) {
+                sessionIdToUse = user.sessionId;
+              }
+
+              if (!sessionIdToUse) {
+                try {
+                  const sessionManager = require('../utils/sessionManager');
+                  const sessions = sessionManager.getActiveSessions();
+                  const match = sessions.find(s => s.user && (s.user.id === user.id || s.user.id === user.spotifyId || s.user.display_name === user.name));
+                  if (match) sessionIdToUse = match.sessionId;
+                } catch (err) {
+                  console.warn('⚠️ Impossible de résoudre session pour auto-play après track_queued (solo):', err);
+                }
+              }
+
+              if (!sessionIdToUse) {
+                console.log('⚠️ Aucun session_id disponible pour auto-play du track ajouté (solo)');
+              } else {
+                const API_BASE = process.env.API_BASE_URL || `http://127.0.0.1:${process.env.PORT || 5000}`;
+                (async () => {
+                  try {
+                    const axios = require('axios');
+                    const response = await axios.post(`${API_BASE.replace(/\/$/, '')}/api/spotify/play-track`, { uri: nextTrack.uri }, {
+                      headers: { 'Content-Type': 'application/json', 'Cookie': `session_id=${sessionIdToUse}` }
+                    });
+
+                    if (response.status >= 200 && response.status < 300) {
+                      console.log(`✅ Auto-play solo démarré pour ${nextTrack.name}`);
+                      // Remove from solo queue locally
+                      const trackIndex = currentPlaybackState.queue.findIndex(q => q.uri === nextTrack.uri);
+                      if (trackIndex !== -1) {
+                        const removedTrack = currentPlaybackState.queue.splice(trackIndex, 1)[0];
+                        io.emit('queue_updated', {
+                          queue: currentPlaybackState.queue,
+                          autoRemoved: true,
+                          removedTrack: removedTrack,
+                          isParty: false
+                        });
+                      }
+                      if (typeof shouldLog === 'function' ? shouldLog('solo_queue_size_after_autoplay') : true) console.log(`ℹ️ Queue solo taille après autoplay remove: ${currentPlaybackState.queue.length}`);
+                      // Update solo playback state
+                      currentPlaybackState.currentTrack = nextTrack;
+                      currentPlaybackState.isPlaying = true;
+                      currentPlaybackState.position = 0;
+                      currentPlaybackState.ownerSpotifyId = user.spotifyId;
+                      // Broadcast solo state
+                      broadcastPlaybackState();
+                    } else {
+                      const txt = response.data || `HTTP ${response.status}`;
+                      console.warn('⚠️ Auto-play solo failed:', txt);
+                      io.to(socket.id).emit('auto_play_failed', { error: txt });
+                    }
+                  } catch (err) {
+                    const txt = err?.response?.data || err.message;
+                    console.error('❌ Erreur lors de l\'appel interne pour auto-play solo:', txt);
+                    io.to(socket.id).emit('auto_play_failed', { error: txt });
+                  }
+                })();
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('⚠️ Erreur dans auto-play after track_queued (solo):', err);
+        }
       }
     });
 
@@ -980,31 +1142,66 @@ const socketHandler = (io) => {
       const user = connectedUsers.get(socket.id);
       if (!user) return;
 
-      // La file d'attente fonctionne seulement en mode Party
-      if (!user.isSyncedWithParty) {
-        console.log(`⚠️ ${user.name} a tenté de supprimer une piste en mode Solo (non autorisé)`);
+      // Determine which queue to operate on based on user's sync mode
+      const isPartyOp = !!user.isSyncedWithParty;
+      if (isPartyOp) {
+        const trackIndex = partyPlaybackState.queue.findIndex(track => track.id === trackId);
+        if (trackIndex !== -1) {
+          const removedTrack = partyPlaybackState.queue.splice(trackIndex, 1)[0];
+          console.log(`🗑️ ${user.name} a supprimé "${removedTrack.name}" de la file d'attente party`);
+
+          // Informer tous les clients de la mise à jour de la queue
+          io.emit('queue_updated', {
+            queue: partyPlaybackState.queue,
+            removedTrack: removedTrack,
+            removedBy: user.name,
+            isParty: true
+          });
+
+          // Message dans le chat
+          io.emit('queue_message', {
+            user: user.name,
+            message: `a supprimé "${removedTrack.name}" de la file d'attente`,
+            timestamp: new Date()
+          });
+        }
         return;
       }
 
-      const trackIndex = partyPlaybackState.queue.findIndex(track => track.id === trackId);
-      if (trackIndex !== -1) {
-        const removedTrack = partyPlaybackState.queue.splice(trackIndex, 1)[0];
-        console.log(`🗑️ ${user.name} a supprimé "${removedTrack.name}" de la file d'attente party`);
-
-        // Informer tous les clients de la mise à jour de la queue
-        io.emit('queue_updated', {
-          queue: partyPlaybackState.queue,
-          removedTrack: removedTrack,
-          removedBy: user.name
-        });
-
-        // Message dans le chat
-        io.emit('queue_message', {
-          user: user.name,
-          message: `a supprimé "${removedTrack.name}" de la file d'attente`,
-          timestamp: new Date()
-        });
+      // Solo operation: allow removal from solo queue with sensible permissions
+      const trackIndexSolo = currentPlaybackState.queue.findIndex(track => track.id === trackId);
+      if (trackIndexSolo === -1) {
+        // nothing to remove
+        return;
       }
+
+      const trackToRemove = currentPlaybackState.queue[trackIndexSolo];
+      // Permit removal if the requester added the track, or is premium, or is the fetcher
+      const amIFetcher = currentPlaybackState.fetcher && (currentPlaybackState.fetcher.spotifyId === user.spotifyId || currentPlaybackState.fetcher.socketId === socket.id);
+      const canRemoveSolo = (trackToRemove.addedBy === user.name) || !!user.premium || !!amIFetcher;
+
+      if (!canRemoveSolo) {
+        console.log(`⚠️ ${user.name} n'est pas autorisé à supprimer la piste solo ${trackToRemove.name}`);
+        socket.emit('control_denied', { reason: 'Not allowed to remove this track from solo queue' });
+        return;
+      }
+
+      const removedTrack = currentPlaybackState.queue.splice(trackIndexSolo, 1)[0];
+      console.log(`🗑️ ${user.name} a supprimé "${removedTrack.name}" de la file d'attente solo`);
+
+      // Emit updated solo queue
+      io.emit('queue_updated', {
+        queue: currentPlaybackState.queue,
+        removedTrack: removedTrack,
+        removedBy: user.name,
+        isParty: false
+      });
+
+      io.emit('queue_message', {
+        user: user.name,
+        message: `a supprimé "${removedTrack.name}" de la file d'attente solo`,
+        timestamp: new Date()
+      });
     });
 
     // Événement de changement d'état de lecture
@@ -1217,7 +1414,8 @@ socketHandler.removeFirstFromQueue = () => {
       ioInstance.emit('queue_updated', {
         queue: currentPlaybackState.queue,
         autoRemoved: true,
-        removedTrack: removedTrack
+        removedTrack: removedTrack,
+        isParty: false
       });
     }
     return removedTrack;

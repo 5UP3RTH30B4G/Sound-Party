@@ -8,18 +8,16 @@ import {
   IconButton,
   Typography,
   Box,
-  Chip,
-  ToggleButton,
-  ToggleButtonGroup
+  Chip
 } from '@mui/material';
 import { Remove, MusicNote, PlayArrow } from '@mui/icons-material';
 import { useSocket } from '../contexts/SocketContext';
+import { useAuth } from '../contexts/AuthContext';
 import axios from 'axios';
 
-const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || process.env.REACT_APP_API_URL;
-
 const QueueComponent = () => {
-  const { playbackState, partyState, isSyncedWithParty, togglePartySync, emitTrackRemovedFromQueue } = useSocket();
+  const { playbackState, partyState, isSyncedWithParty, emitTrackRemovedFromQueue } = useSocket();
+  const { API_BASE_URL } = useAuth();
   // Effective fetcher: party fetcher preferred, otherwise solo playback fetcher
   const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
   const activeState = isSyncedWithParty ? partyState : playbackState;
@@ -56,11 +54,7 @@ const QueueComponent = () => {
     }
   };
 
-  const handleModeToggle = (event, newMode) => {
-    if (newMode !== null) {
-      togglePartySync(newMode === 'party');
-    }
-  };
+  // Mode toggle removed from UI; keep this component focused on rendering the queue
 
   const formatDuration = (ms) => {
     const minutes = Math.floor(ms / 60000);
@@ -108,20 +102,6 @@ const QueueComponent = () => {
               {queue.length} chanson{queue.length > 1 ? 's' : ''} en attente
             </Typography>
             
-            <ToggleButtonGroup
-              value={isSyncedWithParty ? 'party' : 'solo'}
-              exclusive
-              onChange={handleModeToggle}
-              size="small"
-              sx={{ height: 28 }}
-            >
-              <ToggleButton value="solo" sx={{ px: 1.5, fontSize: '0.75rem' }}>
-                Solo
-              </ToggleButton>
-              <ToggleButton value="party" sx={{ px: 1.5, fontSize: '0.75rem' }}>
-                Party
-              </ToggleButton>
-            </ToggleButtonGroup>
               {effectiveFetcher && (
                 <Chip
                   label={`Fetcher: ${effectiveFetcher.name || 'actif'}`}
