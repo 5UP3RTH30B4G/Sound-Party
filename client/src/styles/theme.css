@@ -140,6 +140,12 @@ html, body, #root {
   border: 2px solid #1DB954;
 }
 
+/* Prevent avatar from shrinking and ensure good cropping */
+.user-avatar {
+  flex-shrink: 0;
+  object-fit: cover;
+}
+
 .user-name {
   font-weight: 500;
   color: #ffffff;
@@ -364,6 +370,27 @@ html, body, #root {
   .app-title {
     font-size: 18px;
   }
+
+  /* Make title compact on very small screens: show only emoji */
+  .app-title .title-label {
+    display: inline;
+  }
+
+  @media (max-width: 480px) {
+    .app-title {
+      font-size: 16px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .app-title .title-label {
+      display: none;
+    }
+    .app-title .app-emoji {
+      font-size: 20px;
+      line-height: 1;
+    }
+  }
   
   .connection-status {
     padding: 6px 12px;
@@ -394,6 +421,46 @@ html, body, #root {
   
   .section-content {
     padding: 12px;
+  }
+
+  /* Compact logout button on very small screens: keep emoji, hide label */
+  .logout-btn {
+    padding: 6px 8px;
+    min-width: 36px;
+  }
+
+  .logout-btn .logout-label {
+    display: none;
+  }
+
+  .logout-btn .logout-emoji {
+    font-size: 16px;
+    line-height: 1;
+  }
+
+  /* Scale down avatar on very small screens to avoid header breakage */
+  .user-avatar {
+    width: 32px;
+    height: 32px;
+    border-width: 1px;
+  }
+
+  /* Make the mode toggle compact on small screens: show emoji only to avoid header compression */
+  .mode-toggle-btn {
+    padding: 6px 10px;
+    font-size: 13px;
+    gap: 6px;
+    border-radius: 18px;
+  }
+
+  /* Hide textual label and keep emoji visible */
+  .mode-toggle-btn .mode-label {
+    display: none;
+  }
+
+  .mode-toggle-btn .mode-emoji {
+    font-size: 18px;
+    line-height: 1;
   }
 }
 

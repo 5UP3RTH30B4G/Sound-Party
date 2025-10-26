@@ -46,7 +46,10 @@ const MainApp = () => {
       <header className="app-header">
         <div className="header-content">
           <div className="logo-section">
-            <h1 className="app-title">🎵 Sound Party</h1>
+            <h1 className="app-title">
+              <span className="app-emoji">🎵</span>
+              <span className="title-label">Sound Party</span>
+            </h1>
           </div>
           
           <div className="header-info">
@@ -60,7 +63,8 @@ const MainApp = () => {
               onClick={handleModeToggle}
               title={isSyncedWithParty ? 'Passer en mode Solo' : 'Passer en mode Party'}
             >
-              {isSyncedWithParty ? '🎉 Mode Party' : '🎧 Mode Solo'}
+              <span className="mode-emoji">{isSyncedWithParty ? '🎉' : '🎧'}</span>
+              <span className="mode-label">{isSyncedWithParty ? 'Mode Party' : 'Mode Solo'}</span>
             </button>
             
             {user && (
@@ -73,7 +77,8 @@ const MainApp = () => {
             )}
             
             <button className="logout-btn" onClick={handleLogout} title="Se déconnecter">
-              🚪 Déconnexion
+              <span className="logout-emoji">🚪</span>
+              <span className="logout-label">Déconnexion</span>
             </button>
           </div>
         </div>
