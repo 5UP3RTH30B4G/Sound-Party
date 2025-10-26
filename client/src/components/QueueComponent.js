@@ -21,6 +21,7 @@ const QueueComponent = () => {
   // Effective fetcher: party fetcher preferred, otherwise solo playback fetcher
   const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
   const activeState = isSyncedWithParty ? partyState : playbackState;
+  const isAllowed = isSyncedWithParty || !!effectiveFetcher;
   // Guard: activeState may be undefined while the socket/context initializes.
   // Provide a default empty queue to avoid runtime destructure errors.
   const { queue = [] } = activeState || {};
@@ -83,6 +84,32 @@ const QueueComponent = () => {
       minHeight: 0,
       position: 'relative'
     }}>      
+      {/* Restriction overlay like in SearchComponent: only allow queue interactions when a fetcher is active or in Party mode */}
+      {(() => {
+        if (!isAllowed) {
+          return (
+            <Box sx={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: 'rgba(0, 0, 0, 0.7)',
+              zIndex: 10,
+              borderRadius: 1,
+              p: 2
+            }}>
+              <Typography variant="h6" sx={{ color: 'warning.main', textAlign: 'center' }}>
+                🎵 File D'attente disponible uniquement si un fetcher est actif ou en mode Party
+              </Typography>
+            </Box>
+          );
+        }
+        return null;
+      })()}
       {queue && queue.length > 0 ? (
         <>
           <Box sx={{ 
