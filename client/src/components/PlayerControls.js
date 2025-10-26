@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   Box,
   Card,
@@ -42,8 +42,10 @@ const PlayerControls = () => {
 
   // Utiliser l'état approprié selon le mode
   // Guard: partyState or playbackState may be undefined while the socket initializes.
-  // Default to an empty object so property reads (e.g. currentTrack) won't throw.
-  const activeState = isSyncedWithParty ? (partyState || {}) : (playbackState || {});
+  // Wrap in useMemo so identity is stable and won't trigger unrelated effect re-runs.
+  const activeState = useMemo(() => {
+    return isSyncedWithParty ? (partyState || {}) : (playbackState || {});
+  }, [isSyncedWithParty, partyState, playbackState]);
 
   const [currentTrack, setCurrentTrack] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -122,7 +124,13 @@ const PlayerControls = () => {
           } catch (e) {
             // ignore if refs unavailable during initialization
           }
-          setVolume(data.device?.volume_percent || 50);
+          // If Spotify reports a device volume of 0 we must respect it.
+          // Use an explicit check for number to avoid `0` being treated as falsy.
+          if (data.device && typeof data.device.volume_percent === 'number') {
+            setVolume(data.device.volume_percent);
+          } else {
+            setVolume(50);
+          }
           
           // Émettre l'état vers les autres clients
           emitPlaybackStateChange({
@@ -147,7 +155,7 @@ const PlayerControls = () => {
       console.error('Erreur lors de la récupération de l\'état de lecture:', error);
       setError('Erreur de connexion Spotify');
     }
-  }, [API_BASE_URL, refreshToken, emitPlaybackStateChange, rateLimited, isSyncedWithParty, activeState?.fetcher?.spotifyId, activeState?.fetcher?.name, user?.id, user?.display_name]);
+  }, [API_BASE_URL, refreshToken, emitPlaybackStateChange, rateLimited, isSyncedWithParty, activeState, user?.id, user?.display_name, emitPlayNextFromQueue, emitPlaybackControl, duration]);
 
   // When entering Party mode, clear pending timers/estimators to avoid
   // briefly showing local playback info before party state arrives.
@@ -183,21 +191,38 @@ const PlayerControls = () => {
 
   // Récupérer les appareils disponibles
   const fetchDevices = useCallback(async () => {
+    // Only attempt to fetch devices when this client is allowed to poll Spotify.
+    // In Party mode only the fetcher should call Spotify; otherwise allow fetcher or premium users.
     if (!API_BASE_URL || !refreshToken || rateLimited) return;
-
     try {
+      const amIFetcher = activeState?.fetcher && (activeState.fetcher.spotifyId === user?.id || activeState.fetcher.name === user?.display_name);
+      const noFetcher = !activeState?.fetcher;
+      let canFetch;
+      if (isSyncedWithParty) {
+        canFetch = !!amIFetcher;
+      } else {
+        canFetch = amIFetcher || (noFetcher && user?.product === 'premium');
+      }
+      if (!canFetch) return;
+
       const response = await fetch(`${API_BASE_URL}/api/spotify/devices`, {
         credentials: 'include'
       });
 
       if (response.ok) {
         const data = await response.json();
-        setDevices(data.devices || []);
+        const list = data.devices || [];
+        setDevices(list);
+        // If a device is active, and provides a numeric volume, use it.
+        const active = list.find(d => d.is_active);
+        if (active && typeof active.volume_percent === 'number') {
+          setVolume(active.volume_percent);
+        }
       }
     } catch (error) {
       console.error('Erreur lors de la récupération des appareils:', error);
     }
-  }, [API_BASE_URL, refreshToken, rateLimited]);
+  }, [API_BASE_URL, refreshToken, rateLimited, activeState, user?.id, user?.display_name, user?.product, isSyncedWithParty]);
 
   // Throttle combiné pour playback + devices: au moins 1000ms entre deux séries d'appels
   const lastApiCallRef = useRef(0);
@@ -222,8 +247,9 @@ const PlayerControls = () => {
     const execute = async () => {
       lastApiCallRef.current = Date.now();
       try {
-        // run both in parallel but treat them as one "API interaction"
-        await Promise.all([fetchPlaybackState(), fetchDevices()]);
+        // Only fetch playback state periodically. Devices are fetched on-demand
+        // when the user opens the devices menu to avoid unnecessary polling.
+        await fetchPlaybackState();
       } catch (e) {
         // ignore individual errors here (they're handled in each fn)
       }
@@ -240,7 +266,7 @@ const PlayerControls = () => {
         execute();
       }, 1000 - elapsed);
     }
-  }, [API_BASE_URL, refreshToken, rateLimited, serverRateLimitedMs, fetchPlaybackState, fetchDevices]);
+  }, [API_BASE_URL, refreshToken, rateLimited, serverRateLimitedMs, fetchPlaybackState]);
 
   // Appel Périodique Playback + Devices
   useEffect(() => {
@@ -505,7 +531,7 @@ const PlayerControls = () => {
       }
       try { console.log('estimator interval cleared'); } catch (e) {}
     };
-  }, [isPlaying, currentTrack, duration, playbackState, partyState, isSyncedWithParty, emitPlayNextFromQueue, baselineReady]);
+  }, [isPlaying, currentTrack, duration, playbackState, partyState, isSyncedWithParty, emitPlayNextFromQueue, baselineReady, activeState, emitPlaybackControl, user?.id, user?.display_name, user?.product]);
 
   // Écouter l'événement CustomEvent 'autoPlayTrackFromQueue' dispatché par SocketContext
   useEffect(() => {
@@ -869,7 +895,17 @@ const PlayerControls = () => {
                 }}
               />
               <IconButton 
-                onClick={(e) => setDeviceMenuAnchor(e.currentTarget)}
+                onClick={async (e) => {
+                  // React pools synthetic events — capture the anchor before any await
+                  const anchor = e.currentTarget;
+                  try {
+                    // Fetch devices on demand when opening the menu
+                    await fetchDevices();
+                  } catch (err) {
+                    console.warn('Erreur lors du fetchDevices on open:', err);
+                  }
+                  setDeviceMenuAnchor(anchor);
+                }}
                 size="small"
                 sx={{ color: 'text.secondary' }}
               >
