@@ -623,3 +623,58 @@ router.get('/internal/spotify-counters', (req, res) => {
     return res.status(500).json({ error: 'internal error' });
   }
 });
+
+// Obtenir les métadonnées d'un track (utilisable même si le client n'est pas authentifié)
+// This endpoint will try to resolve an access token from the request like /search
+// and will fall back to the active party fetcher session if available.
+router.get('/track/:id', async (req, res) => {
+  logSpotifyCall(req, '/track/:id');
+  const trackId = req.params.id;
+  if (!trackId) return res.status(400).json({ error: 'track id missing' });
+
+  try {
+    // Resolve access token similarly to /search
+    let access_token = req.cookies?.access_token;
+    let sessionId = req.cookies?.session_id;
+
+    if (!access_token && sessionId) {
+      const session = sessionManager.getSession(sessionId);
+      if (session && session.access_token) access_token = session.access_token;
+    }
+
+    // If still no access token, try the active party fetcher
+    if (!access_token) {
+      try {
+        const playbackState = socketHandler.getPlaybackState();
+        if (playbackState && playbackState.fetcher && playbackState.fetcher.sessionId) {
+          const fsess = sessionManager.getSession(playbackState.fetcher.sessionId);
+          if (fsess && fsess.access_token) {
+            access_token = fsess.access_token;
+            sessionId = playbackState.fetcher.sessionId;
+            if (typeof shouldLog === 'function' ? shouldLog('track_using_fetcher') : true) console.log('ℹ️ Using fetcher session for unauthenticated track lookup');
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    if (!access_token) {
+      return res.status(401).json({ error: 'Not authenticated and no fetcher available' });
+    }
+
+    const response = await callSpotify({
+      method: 'get',
+      url: `https://api.spotify.com/v1/tracks/${encodeURIComponent(trackId)}`,
+      headers: { Authorization: 'Bearer ' + access_token }
+    });
+
+    return res.json(response.data);
+  } catch (error) {
+    if (error.status === 429) return res.status(429).json({ error: 'Rate limited', ms: error.ms });
+    const status = error.response?.status || 500;
+    const message = error.response?.data?.error?.message || error.message || 'Erreur lors de la récupération du track';
+    console.error('Erreur track lookup:', error.response?.data || error.message);
+    return res.status(status).json({ error: message });
+  }
+});

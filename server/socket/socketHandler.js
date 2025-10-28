@@ -1300,9 +1300,14 @@ const socketHandler = (io) => {
           playbackForRequester = { ...playbackForRequester, currentTrack: null, isPlaying: false, position: 0 };
         }
       }
+      // Include partyState in full_sync so clients following the party do not
+      // receive an undefined partyState which could clear their UI.
       socket.emit('full_sync', {
         playbackState: playbackForRequester,
-        connectedUsers: usersList
+        partyState: partyPlaybackState,
+        connectedUsers: usersList,
+        // Inform requester whether they are currently marked as synced with party
+        isSyncedWithParty: !!(connectedUsers.get(socket.id) && connectedUsers.get(socket.id).isSyncedWithParty)
       });
     });
   });

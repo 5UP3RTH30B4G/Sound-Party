@@ -98,18 +98,41 @@ export const SocketProvider = ({ children, socket }) => {
 
         if (isSyncedWithParty && !amIFetcher) {
           // ignore solo playback update while following a party
-          console.log('Ignored solo playback_state_updated because client is synced with party and not fetcher');
-          return;
+          if (process.env.NODE_ENV !== 'development') {
+            console.log('Ignored solo playback_state_updated because client is synced with party and not fetcher');
+          }
+        } else {
+          setPlaybackState(state);
         }
-
-        setPlaybackState(state);
       } catch (err) {
         console.warn('Error handling playback_state_updated', err);
       }
-    });
 
-    // Événement de mise à jour de l'état party
+      // Dev: print detailed payload for debugging
+      if (process.env.NODE_ENV !== 'production') {
+        try {
+          console.log('socket: playback_state_updated (detail):', JSON.stringify({
+            currentTrack: state?.currentTrack?.name || null,
+            position: state?.position,
+            isPlaying: state?.isPlaying,
+            fetcher: state?.fetcher || null
+          }));
+        } catch (e) { console.log('socket: playback_state_updated (raw):', state); }
+      }
+    });
     socket.on('party_state_updated', (state) => {
+      if (process.env.NODE_ENV !== 'production') {
+        try {
+          console.log('socket: party_state_updated', state);
+          console.log('socket: party_state_updated (detail):', JSON.stringify({
+            currentTrack: state?.currentTrack?.name || null,
+            position: state?.position,
+            isPlaying: state?.isPlaying,
+            queueLength: state?.queue?.length || 0,
+            fetcher: state?.fetcher || null
+          }));
+        } catch (e) { /* ignore stringify errors */ }
+      }
       setPartyState(state);
     });
 
@@ -274,10 +297,28 @@ export const SocketProvider = ({ children, socket }) => {
 
     // Synchronisation complète
     socket.on('full_sync', (data) => {
+      if (process.env.NODE_ENV !== 'production') {
+        try {
+          console.log('socket: full_sync', data);
+          console.log('socket: full_sync (detail):', JSON.stringify({
+            playback_current: data?.playbackState?.currentTrack?.name || null,
+            playback_pos: data?.playbackState?.position,
+            playback_playing: data?.playbackState?.isPlaying,
+            party_current: data?.partyState?.currentTrack?.name || null,
+            party_pos: data?.partyState?.position,
+            party_playing: data?.partyState?.isPlaying,
+            party_queue_len: data?.partyState?.queue?.length || 0,
+            isSyncedWithParty: data?.isSyncedWithParty
+          }));
+        } catch (e) { console.log('socket: full_sync (raw):', data); }
+      }
       setPlaybackState(data.playbackState);
       setPartyState(data.partyState);
       setConnectedUsers(data.connectedUsers);
-      setIsSyncedWithParty(!!data.isSyncedWithParty);
+      // Only update isSyncedWithParty if server explicitly provides the flag
+      if (typeof data.isSyncedWithParty !== 'undefined') {
+        setIsSyncedWithParty(!!data.isSyncedWithParty);
+      }
     });
 
     return () => {
@@ -333,6 +374,8 @@ export const SocketProvider = ({ children, socket }) => {
               });
             }
         }, 500);
+      } else {
+        console.log('⚠️ Utilisateur déjà connecté, éviter la double connexion');
       }
     }
   }, [authenticated, user, socket, connectionStatus, connectedUsers]);
@@ -420,7 +463,11 @@ export const SocketProvider = ({ children, socket }) => {
 
   const togglePartySync = (isSynced) => {
     if (socket && authenticated) {
-      console.log(`🔄 Basculer mode ${isSynced ? 'Party' : 'Solo'}`);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`socket.emit toggle_party_sync -> ${isSynced ? 'Party' : 'Solo'}`);
+        // Print a stack trace to help identify accidental callers (dev only)
+        try { console.trace('togglePartySync called from:'); } catch (e) {}
+      }
       socket.emit('toggle_party_sync', { isSynced });
       setIsSyncedWithParty(isSynced);
     }
