@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const sessionManager = require('../utils/sessionManager');
+const socketHandler = require('../socket/socketHandler');
 const router = express.Router();
 
 // Middleware pour vérifier l'authentification
@@ -27,7 +28,6 @@ const requireAuth = (req, res, next) => {
 };
 
 const rateLimiter = require('../utils/rateLimiter');
-const socketHandler = require('../socket/socketHandler');
 
 // Lightweight in-memory counters to detect excessive calls per endpoint (resets every minute)
 const callCounters = new Map();
@@ -415,8 +415,7 @@ router.post('/queue/next', requireAuth, async (req, res) => {
   try {
     console.log('🎵 Demande de lecture du prochain titre de la queue locale');
     
-    // Récupérer la queue locale depuis le socket handler
-    const socketHandler = require('../socket/socketHandler');
+    // Récupérer la queue locale depuis le socket handler (already imported at top)
     const playbackState = socketHandler.getPlaybackState();
     
     if (!playbackState || !playbackState.queue || playbackState.queue.length === 0) {
@@ -575,6 +574,13 @@ router.put('/seek', requireAuth, async (req, res) => {
       headers: { 'Authorization': 'Bearer ' + req.access_token }
     });
     console.log('✅ Position changée à:', Math.round(position_ms) + 'ms');
+    
+    // If in Party mode, update server-side Party state to prevent position oscillation
+    if (socketHandler.partyPlaybackState && socketHandler.partyPlaybackState.currentTrack) {
+      console.log('🎉 Party mode detected — updating server Party position to', position_ms);
+      socketHandler.seekPartyPlayback(position_ms);
+    }
+    
     res.json({ success: true, position_ms: position_ms });
   } catch (error) {
     if (error.status === 429) return res.status(429).json({ error: 'Rate limited', ms: error.ms });

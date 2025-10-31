@@ -2,13 +2,16 @@
 let connectedUsers = new Map();
 
 // Party playback state (shared by all synchronized users)
+// This state is server-authoritative: position is calculated from playbackStartTime
 let partyPlaybackState = {
   isPlaying: false,
   currentTrack: null,
   position: 0,
   queue: [],
   fetcher: null,
-  ownerSpotifyId: null
+  ownerSpotifyId: null,
+  playbackStartTime: null, // timestamp when playback started (for position calculation)
+  pausedAt: null // position where playback was paused (null when playing)
 };
 
 // Legacy currentPlaybackState kept for backward compatibility (will be replaced gradually)
@@ -54,14 +57,79 @@ function shouldLog(key, intervalMs = 5000) {
   }
 }
 
+// Helper functions for Party playback state management (declared at module level for export)
+
+// Helper: start playback for party (sets timing for position calculation)
+const startPartyPlayback = (track, startPosition = 0) => {
+  partyPlaybackState.currentTrack = track;
+  partyPlaybackState.isPlaying = true;
+  partyPlaybackState.position = startPosition;
+  partyPlaybackState.playbackStartTime = Date.now();
+  partyPlaybackState.pausedAt = startPosition; // Use startPosition as base, not null
+  console.log('🎵 Party playback started:', track?.name || 'unknown', 'at position:', startPosition, 'ms');
+};
+
+// Helper: pause party playback (saves current position)
+const pausePartyPlayback = () => {
+  if (partyPlaybackState.isPlaying && partyPlaybackState.playbackStartTime) {
+    const elapsed = Date.now() - partyPlaybackState.playbackStartTime;
+    // pausedAt is already set as the base position (from start or resume)
+    const basePosition = partyPlaybackState.pausedAt || 0;
+    const newPosition = basePosition + elapsed;
+    partyPlaybackState.pausedAt = newPosition;
+    partyPlaybackState.position = newPosition;
+    console.log('⏸️ Party paused at position:', newPosition, 'ms (base:', basePosition, '+ elapsed:', elapsed, ')');
+  }
+  partyPlaybackState.isPlaying = false;
+  partyPlaybackState.playbackStartTime = null;
+};
+
+// Helper: resume party playback from paused position
+const resumePartyPlayback = () => {
+  if (!partyPlaybackState.isPlaying) {
+    partyPlaybackState.isPlaying = true;
+    partyPlaybackState.playbackStartTime = Date.now();
+    console.log('▶️ Party resumed from position:', partyPlaybackState.pausedAt, 'ms');
+    // pausedAt remains set, will be used as base position for future calculations
+  }
+};
+
+// Helper: seek party playback to specific position
+const seekPartyPlayback = (position_ms) => {
+  partyPlaybackState.position = position_ms;
+  partyPlaybackState.pausedAt = position_ms;
+  if (partyPlaybackState.isPlaying) {
+    partyPlaybackState.playbackStartTime = Date.now();
+  }
+  console.log('⏩ Party seeked to position:', position_ms, 'ms');
+};
+
 // Main socket handler entrypoint
 const socketHandler = (io) => {
   ioInstance = io;
 
   // NEW: Broadcast party playback state to all synchronized users
+  // Calculate real-time position based on playback start time
   const broadcastPartyState = () => {
     try {
-      io.emit('party_state_updated', partyPlaybackState);
+      const stateToBroadcast = { ...partyPlaybackState };
+      
+      // Calculate current position if playing
+      if (stateToBroadcast.isPlaying && stateToBroadcast.playbackStartTime) {
+        const elapsed = Date.now() - stateToBroadcast.playbackStartTime;
+        const basePosition = stateToBroadcast.pausedAt || 0;
+        stateToBroadcast.position = basePosition + elapsed;
+        
+        // Clamp to track duration if we have it
+        if (stateToBroadcast.currentTrack && stateToBroadcast.currentTrack.duration_ms) {
+          stateToBroadcast.position = Math.min(stateToBroadcast.position, stateToBroadcast.currentTrack.duration_ms);
+        }
+      } else if (!stateToBroadcast.isPlaying && stateToBroadcast.pausedAt !== null && stateToBroadcast.pausedAt !== undefined) {
+        // When paused, use the exact paused position
+        stateToBroadcast.position = stateToBroadcast.pausedAt;
+      }
+      
+      io.emit('party_state_updated', stateToBroadcast);
     } catch (err) {
       console.warn('⚠️ Erreur lors du broadcast party state:', err);
     }
@@ -386,13 +454,16 @@ const socketHandler = (io) => {
             io.emit('queue_updated', { queue: targetQueue, autoRemoved: true, removedTrack: removed, isParty: isPartyRequest });
 
             // Update playback state
-            targetState.currentTrack = nextTrack;
-            targetState.isPlaying = true;
-            targetState.position = 0;
             targetState.ownerSpotifyId = user.spotifyId || (targetState.fetcher && targetState.fetcher.spotifyId) || null;
+            
             if (isPartyRequest) {
+              // Use helper for proper timing
+              startPartyPlayback(nextTrack, 0);
               broadcastPartyState();
             } else {
+              targetState.currentTrack = nextTrack;
+              targetState.isPlaying = true;
+              targetState.position = 0;
               broadcastPlaybackState();
             }
             return;
@@ -551,9 +622,16 @@ const socketHandler = (io) => {
             if (playRes && playRes.ok) {
               const removed = targetState.queue.shift();
               io.emit('queue_updated', { queue: targetState.queue, autoRemoved: true, removedTrack: removed, isParty: isPartyMode });
-              targetState.currentTrack = nextTrack;
-              targetState.isPlaying = true;
-              targetState.position = 0;
+              
+              // Use helper to properly initialize playback timing in Party mode
+              if (isPartyMode) {
+                startPartyPlayback(nextTrack, 0);
+              } else {
+                targetState.currentTrack = nextTrack;
+                targetState.isPlaying = true;
+                targetState.position = 0;
+              }
+              
               targetState.ownerSpotifyId = user.spotifyId;
               if (canControlDirectly) {
                 targetState.fetcher = { spotifyId: user.spotifyId, name: user.name, socketId: socket.id, sessionId: user.sessionId };
@@ -668,19 +746,20 @@ const socketHandler = (io) => {
               io.emit('queue_updated', { queue: targetState.queue, autoRemoved: true, removedTrack: removed, isParty: isPartyMode });
 
               // Update server playback state
-              targetState.currentTrack = nextTrack;
-              targetState.isPlaying = true;
-              targetState.position = 0;
               targetState.ownerSpotifyId = user.spotifyId;
               // If controlling directly, ensure fetcher assignment
               if (canControlDirectly) {
                 targetState.fetcher = { spotifyId: user.spotifyId, name: user.name, socketId: socket.id, sessionId: user.sessionId };
               }
 
-              // Broadcast the updated playback state
+              // Use helper for party mode to set proper timing
               if (isPartyMode) {
+                startPartyPlayback(nextTrack, 0);
                 broadcastPartyState();
               } else {
+                targetState.currentTrack = nextTrack;
+                targetState.isPlaying = true;
+                targetState.position = 0;
                 broadcastPlaybackState();
               }
               socket.broadcast.emit('playback_control_received', { user: user.name, action: 'next', timestamp: new Date() });
@@ -730,13 +809,20 @@ const socketHandler = (io) => {
                     if (action.type === 'play' && actuallyPlaying) {
                       console.log('ℹ️ Relay returned 403 but playback-state shows playing — treating as success');
                       // Update server-side playbackState
-                      targetState.isPlaying = true;
-                      if (stateData.item) targetState.currentTrack = stateData.item;
-                      targetState.position = stateData.progress_ms || 0;
                       if (canControlDirectly) {
                         targetState.fetcher = { spotifyId: user.spotifyId, name: user.name, socketId: socket.id, sessionId: user.sessionId };
                         targetState.ownerSpotifyId = user.spotifyId;
                       }
+                      
+                      // Handle play/pause with proper timing for party mode
+                      if (isPartyMode) {
+                        resumePartyPlayback();
+                      } else {
+                        targetState.isPlaying = true;
+                        if (stateData.item) targetState.currentTrack = stateData.item;
+                        targetState.position = stateData.progress_ms || 0;
+                      }
+                      
                       if (isPartyMode) {
                         broadcastPartyState();
                       } else {
@@ -749,13 +835,20 @@ const socketHandler = (io) => {
                     // If requested 'pause' and Spotify reports not playing, treat as success
                     if (action.type === 'pause' && !actuallyPlaying) {
                       console.log('ℹ️ Relay returned 403 but playback-state shows paused — treating as success');
-                      targetState.isPlaying = false;
-                      if (stateData.item) targetState.currentTrack = stateData.item;
-                      targetState.position = stateData.progress_ms || 0;
                       if (canControlDirectly) {
                         targetState.fetcher = { spotifyId: user.spotifyId, name: user.name, socketId: socket.id, sessionId: user.sessionId };
                         targetState.ownerSpotifyId = user.spotifyId;
                       }
+                      
+                      // Handle play/pause with proper timing for party mode
+                      if (isPartyMode) {
+                        pausePartyPlayback();
+                      } else {
+                        targetState.isPlaying = false;
+                        if (stateData.item) targetState.currentTrack = stateData.item;
+                        targetState.position = stateData.progress_ms || 0;
+                      }
+                      
                       if (isPartyMode) {
                         broadcastPartyState();
                       } else {
@@ -797,8 +890,18 @@ const socketHandler = (io) => {
           // direct control gives ownership of playback to this user
           targetState.ownerSpotifyId = user.spotifyId;
         }
-        if (action.type === 'play') targetState.isPlaying = true;
-        if (action.type === 'pause') targetState.isPlaying = false;
+        
+        // Handle play/pause with proper timing for party mode
+        if (isPartyMode) {
+          if (action.type === 'play') {
+            resumePartyPlayback();
+          } else if (action.type === 'pause') {
+            pausePartyPlayback();
+          }
+        } else {
+          if (action.type === 'play') targetState.isPlaying = true;
+          if (action.type === 'pause') targetState.isPlaying = false;
+        }
 
         // Broadcast playback state changes using helper (full only to exact fetcher socket)
         if (isPartyMode) {
@@ -1013,11 +1116,9 @@ const socketHandler = (io) => {
                         });
                       }
                       if (typeof shouldLog === 'function' ? shouldLog('party_queue_size_after_autoplay') : true) console.log(`ℹ️ Queue party taille après autoplay remove: ${partyPlaybackState.queue.length}`);
-                      // Update party playback state
-                      partyPlaybackState.currentTrack = nextTrack;
-                      partyPlaybackState.isPlaying = true;
-                      partyPlaybackState.position = 0;
+                      // Update party playback state using helper
                       partyPlaybackState.ownerSpotifyId = user.spotifyId;
+                      startPartyPlayback(nextTrack, 0);
                       // Broadcast party state
                       broadcastPartyState();
                     } else {
@@ -1318,6 +1419,22 @@ const socketHandler = (io) => {
     // currentPlaybackState.queue = currentPlaybackState.queue.slice(-50); // Garder seulement les 50 dernières
   }, 5 * 60 * 1000); // Toutes les 5 minutes
 
+  // Broadcast périodique de l'état Party avec position mise à jour (toutes les 500ms)
+  // Cela assure que tous les clients synchronisés affichent la même position en temps réel
+  setInterval(() => {
+    try {
+      // Only broadcast if there are party-synced users and something is playing
+      if (partyPlaybackState.isPlaying || partyPlaybackState.currentTrack) {
+        const syncedUsers = Array.from(connectedUsers.values()).filter(u => u.isSyncedWithParty);
+        if (syncedUsers.length > 0) {
+          broadcastPartyState();
+        }
+      }
+    } catch (err) {
+      console.warn('⚠️ Erreur dans le broadcast périodique Party:', err);
+    }
+  }, 500); // Every 500ms
+
   // Periodic check: Verify that connected users' Spotify access tokens are still valid.
   // We only check sessions for currently connected users to limit Spotify API usage.
   const tokenCheckIntervalMs = 2 * 60 * 1000; // every 2 minutes
@@ -1444,3 +1561,5 @@ socketHandler.notifyRateLimit = (ms) => {
 };
 
 module.exports = socketHandler;
+module.exports.partyPlaybackState = partyPlaybackState;
+module.exports.seekPartyPlayback = seekPartyPlayback;

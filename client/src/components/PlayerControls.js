@@ -37,7 +37,8 @@ const PlayerControls = () => {
     emitPlaybackStateChange,
     emitPlayNextFromQueue,
     emitTrackRemovedFromQueue,
-    serverRateLimitedMs
+    serverRateLimitedMs,
+    requestSync
   } = useSocket();
 
   // Utiliser l'état approprié selon le mode
@@ -305,19 +306,86 @@ const PlayerControls = () => {
 
   // Synchroniser avec les événements socket.
   // En mode Party, n'afficher une piste actuelle que si elle provient de la file d'attente partagée.
+  // Improve party UI stability: partyState updates may transiently omit
+  // `currentTrack` during server-side queue removals and re-broadcasts. If we
+  // immediately clear the UI when `partyState.currentTrack` is momentarily
+  // undefined we'll see a flicker (image disappears then reappears). To avoid
+  // that, keep the last seen party track visible until the server explicitly
+  // signals playback stopped (isPlaying=false) or a new track arrives.
+  const lastSeenPartyTrackRef = useRef(null);
+
+  const fetchTrackDetails = useCallback(async (track) => {
+    try {
+      if (!track) return null;
+      // If we already have images, nothing to do
+      if (track.album && track.album.images && track.album.images.length > 0) return track;
+
+      // Extract an ID from possible uri formats
+      const uri = track.uri || track.id || '';
+      let id = null;
+      if (uri.startsWith('spotify:track:')) {
+        id = uri.split(':').pop();
+      } else {
+        // Try URL form
+        const m = String(uri).match(/track\/([a-zA-Z0-9]+)/);
+        if (m) id = m[1];
+      }
+      if (!id) return track;
+
+      if (!API_BASE_URL) return track;
+      const resp = await fetch(`${API_BASE_URL}/api/spotify/track/${encodeURIComponent(id)}`, { credentials: 'include' });
+      if (!resp.ok) return track;
+      const data = await resp.json();
+      // Merge album/images into existing track object to avoid losing other fields
+      return { ...track, album: data.album || track.album, images: data.album?.images || track.images, artists: data.artists || track.artists };
+    } catch (e) {
+      console.warn('Erreur fetchTrackDetails:', e);
+      return track;
+    }
+  }, [API_BASE_URL]);
   useEffect(() => {
     if (isSyncedWithParty) {
       const partyTrack = partyState?.currentTrack;
-      const inQueue = partyState?.queue && Array.isArray(partyState.queue) && partyState.queue.some(t => t.id === partyTrack?.id);
-      if (partyTrack && inQueue) {
-        setCurrentTrack(partyTrack);
-        setIsPlaying(partyState.isPlaying);
-        setPosition(partyState.position || 0);
+      const partyPlaying = !!partyState?.isPlaying;
+      const partyPosition = partyState?.position || 0;
+
+      if (partyTrack) {
+        // Only enrich track metadata if it's a NEW track (different ID)
+        const isNewTrack = lastSeenPartyTrackRef.current?.id !== partyTrack.id;
+        
+        if (isNewTrack) {
+          (async () => {
+            lastSeenPartyTrackRef.current = partyTrack;
+            // Attempt to enrich track metadata (album images) if missing
+            const enriched = await fetchTrackDetails(partyTrack);
+            lastSeenPartyTrackRef.current = enriched || partyTrack;
+            setCurrentTrack(enriched || partyTrack);
+            setDuration(partyTrack.duration_ms || 0);
+          })();
+        }
+        
+        setIsPlaying(partyPlaying);
+        // Use server-provided position directly (no local estimation in Party mode)
+        setPosition(partyPosition);
       } else {
-        // No queue-originating track is playing — clear local display
-        setCurrentTrack(null);
-        setIsPlaying(false);
-        setPosition(0);
+        // No explicit currentTrack in the update. Only clear when party is
+        // not playing — otherwise keep showing the last seen track to avoid flicker.
+        if (!partyPlaying) {
+          lastSeenPartyTrackRef.current = null;
+          setCurrentTrack(null);
+          setIsPlaying(false);
+          setPosition(0);
+        } else {
+          // keep last seen track visible and update position if provided
+          if (lastSeenPartyTrackRef.current) {
+            setCurrentTrack(lastSeenPartyTrackRef.current);
+          }
+          if (partyState?.position !== undefined) {
+            setPosition(partyState.position || 0);
+          }
+          // keep isPlaying true
+          setIsPlaying(true);
+        }
       }
     } else {
       // Solo mode: display local playback state as usual
@@ -351,6 +419,12 @@ const PlayerControls = () => {
     if (estimateIntervalRef.current) {
       clearInterval(estimateIntervalRef.current);
       estimateIntervalRef.current = null;
+    }
+
+    // In Party mode, the server calculates position and broadcasts it every 500ms.
+    // Skip local estimation entirely to avoid cursor oscillation.
+    if (isSyncedWithParty) {
+      return;
     }
 
     // Log when effect runs so we can verify it's executing
@@ -636,10 +710,16 @@ const PlayerControls = () => {
   };
 
   const handlePositionChange = (event, newValue) => {
+    // Immediate visual feedback during dragging (temporary position)
     setPosition(newValue);
   };
 
   const handlePositionChangeCommitted = async (event, newValue) => {
+    if (process.env.NODE_ENV !== 'production') {
+      try {
+        console.log('DEBUG: handlePositionChangeCommitted invoked', { newValue, isSyncedWithParty });
+      } catch (e) {}
+    }
     try {
       const response = await fetch(`${API_BASE_URL}/api/spotify/seek`, {
         method: 'PUT',
@@ -651,8 +731,15 @@ const PlayerControls = () => {
       });
       
       if (response.ok) {
-        setPosition(newValue);
-        emitPlaybackStateChange({ position: newValue });
+        // In Party mode, the server will update partyPlaybackState and broadcast to all clients.
+        // Don't set position locally — trust the server's next broadcast.
+        if (!isSyncedWithParty) {
+          setPosition(newValue);
+          // Only emit playback_state_changed in Solo mode
+          emitPlaybackStateChange({ position: newValue });
+        }
+        // In Party mode, the server /seek endpoint calls seekPartyPlayback()
+        // and the periodic broadcast will sync all clients automatically.
       }
     } catch (error) {
       console.error('Erreur lors du changement de position:', error);
@@ -742,6 +829,14 @@ const PlayerControls = () => {
   return (
     <Card sx={{ mb: 2 }}>
       <CardContent>
+        {/* Debug info visible in development to help track party sync state */}
+        {process.env.NODE_ENV !== 'production' && (
+          <Box sx={{ mb: 1 }}>
+            <Typography variant="caption" color="text.secondary">
+              {`DEBUG: isSyncedWithParty=${String(isSyncedWithParty)} | partyTrack=${partyState?.currentTrack?.name || 'none'} | playbackTrack=${playbackState?.currentTrack?.name || 'none'}`}
+            </Typography>
+          </Box>
+        )}
         {currentTrack ? (
           <>
             <Grid container spacing={2} alignItems="center">
