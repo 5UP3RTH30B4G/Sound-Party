@@ -55,6 +55,7 @@ const PlayerControls = () => {
   const [baselineReady, setBaselineReady] = useState(false);
   const [volume, setVolume] = useState(50);
   const [devices, setDevices] = useState([]);
+  const [devicesLoading, setDevicesLoading] = useState(false);
   const [error, setError] = useState(null);
   const [deviceMenuAnchor, setDeviceMenuAnchor] = useState(null);
   const [rateLimited, setRateLimited] = useState(false);
@@ -187,36 +188,85 @@ const PlayerControls = () => {
   }, [isSyncedWithParty]);
 
   // Récupérer les appareils disponibles
-  const fetchDevices = useCallback(async () => {
+  const fetchDevices = useCallback(async (opts = { force: false }) => {
     // Only attempt to fetch devices when this client is allowed to poll Spotify.
     // We do not poll in Party mode. In Solo mode only premium users may poll.
     if (!API_BASE_URL || !refreshToken || rateLimited) return;
     const canFetch = !isSyncedWithParty && user?.product === 'premium';
     if (!canFetch) return;
 
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/spotify/devices`, {
-        credentials: 'include'
-      });
+    const DEBOUNCE_MS = 5000; // avoid re-fetching devices too often
+    const now = Date.now();
 
-      if (response.ok) {
-        const data = await response.json();
-        const list = data.devices || [];
-        setDevices(list);
-        // If a device is active, and provides a numeric volume, use it.
-        const active = list.find(d => d.is_active);
-        if (active && typeof active.volume_percent === 'number') {
-          setVolume(active.volume_percent);
-        }
-      }
-    } catch (error) {
-      console.error('Erreur lors de la récupération des appareils:', error);
+    // If a fetch is already in-flight, return the same promise so callers coalesce.
+    if (!opts.force && devicesInFlightRef.current) {
+      return devicesInFlightRef.current;
     }
+
+    // If last fetch was recent and caller didn't force, skip
+    if (!opts.force && (now - (lastDevicesFetchRef.current || 0)) < DEBOUNCE_MS) {
+      return; // recent result still valid
+    }
+
+    // Start a new fetch and store the promise in ref so concurrent callers reuse it
+    const promise = (async () => {
+      try { setDevicesLoading(true); } catch (e) {}
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/spotify/devices`, {
+          credentials: 'include'
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          const list = data.devices || [];
+          setDevices(list);
+          // If a device is active, and provides a numeric volume, use it.
+          const active = list.find(d => d.is_active);
+          if (active && typeof active.volume_percent === 'number') {
+            setVolume(active.volume_percent);
+          }
+        }
+        // record timestamp even on non-ok to avoid tight retry loops
+        lastDevicesFetchRef.current = Date.now();
+      } catch (error) {
+        console.error('Erreur lors de la récupération des appareils:', error);
+        lastDevicesFetchRef.current = Date.now();
+      } finally {
+        try { setDevicesLoading(false); } catch (e) {}
+      }
+    })();
+
+    devicesInFlightRef.current = promise;
+    // ensure we clear the in-flight ref when done
+    promise.finally(() => { devicesInFlightRef.current = null; });
+    return promise;
   }, [API_BASE_URL, refreshToken, rateLimited, activeState, user?.id, user?.display_name, user?.product, isSyncedWithParty]);
+
+  // When the authenticated user changes (e.g. multiple logins), ensure we refresh
+  // playback state and devices so the UI (volume, active device) reflects the
+  // currently logged-in user rather than stale data from a previous session.
+  useEffect(() => {
+    if (!user) return;
+    // Do not poll or fetch devices when following a party — party state is authoritative
+    if (isSyncedWithParty) return;
+    // Only premium users may query devices / control playback locally
+    if (user?.product !== 'premium') return;
+
+    // Fetch the playback state and devices for the current user
+    try {
+      fetchPlaybackState();
+    } catch (e) {}
+    try {
+      fetchDevices();
+    } catch (e) {}
+  }, [user?.id, user?.product, isSyncedWithParty, fetchPlaybackState, fetchDevices]);
 
   // Throttle combiné pour playback + devices: au moins 1000ms entre deux séries d'appels
   const lastApiCallRef = useRef(0);
   const scheduledRef = useRef(null);
+  // Coalescing/debounce for devices fetch
+  const lastDevicesFetchRef = useRef(0);
+  const devicesInFlightRef = useRef(null);
   const lastAutoPlayRequestRef = useRef(0);
   const basePositionRef = useRef(position);
   const lastPlaybackUpdateRef = useRef(Date.now());
@@ -673,15 +723,10 @@ const PlayerControls = () => {
     if (serverRateLimitedMs && serverRateLimitedMs > 0) return;
     try {
       const action = isPlaying ? 'pause' : 'play';
-      const response = await fetch(`${API_BASE_URL}/api/spotify/${action}`, {
-        method: 'PUT',
-        credentials: 'include'
-      });
-      
-      if (response.ok) {
-        emitPlaybackControl(action);
-        setIsPlaying(!isPlaying);
-      }
+      // Emit control to server; server is authoritative for party playback and
+      // will relay to Spotify for solo/premium users. We optimistically update UI.
+      if (emitPlaybackControl) emitPlaybackControl(action);
+      setIsPlaying(prev => !prev);
     } catch (error) {
       console.error('Erreur lors du contrôle de lecture:', error);
       setError('Erreur lors du contrôle de lecture');
@@ -703,15 +748,10 @@ const PlayerControls = () => {
   const handlePrevious = async () => {
     if (serverRateLimitedMs && serverRateLimitedMs > 0) return;
     try {
-      const response = await fetch(`${API_BASE_URL}/api/spotify/previous`, {
-        method: 'POST',
-        credentials: 'include'
-      });
-      
-      if (response.ok) {
-        emitPlaybackControl('previous');
-        setTimeout(fetchPlaybackState, 500);
-      }
+      // Delegate previous to the server so it can coordinate party vs solo behavior
+      if (emitPlaybackControl) emitPlaybackControl('previous');
+      // optimistic fetch sync shortly after
+      setTimeout(fetchPlaybackState, 500);
     } catch (error) {
       console.error('Erreur lors du retour au titre précédent:', error);
     }
@@ -778,6 +818,20 @@ const PlayerControls = () => {
   };
 
   const handleDeviceChange = async (deviceId) => {
+    // Close menu immediately so UI stays responsive
+    setDeviceMenuAnchor(null);
+
+    if (!deviceId) {
+      console.warn('handleDeviceChange called without deviceId');
+      return;
+    }
+
+    // Guard: only premium users in Solo may transfer playback locally
+    if (user?.product !== 'premium' || isSyncedWithParty) {
+      console.warn('Device change ignored: not allowed for non-premium or while synced with party');
+      return;
+    }
+
     try {
       const response = await fetch(`${API_BASE_URL}/api/spotify/device`, {
         method: 'PUT',
@@ -792,13 +846,47 @@ const PlayerControls = () => {
       });
       
       if (response.ok) {
-        await fetchDevices();
-        setDeviceMenuAnchor(null);
+        // After a successful transfer, refresh playback state (includes device + volume)
+        try { await fetchPlaybackState(); } catch (e) { /* fetchPlaybackState logs errors */ }
+        // Re-fetch devices list (force) to refresh active flags and volumes
+        try { await fetchDevices({ force: true }); } catch (e) { /* ignore */ }
+        // Ask server to synchronize state across connected clients
+        try { if (requestSync) requestSync(); } catch (e) {}
+      } else {
+        const txt = await response.text();
+        console.warn('Device transfer failed:', txt);
       }
     } catch (error) {
       console.error('Erreur lors du changement d\'appareil:', error);
     }
   };
+
+  // When client becomes synced with a party, ensure we stop local playback
+  // to avoid playing audio locally while following the party.
+  useEffect(() => {
+    if (!isSyncedWithParty) return;
+
+    // Only attempt to pause local playback for premium users (who can control devices)
+    if (user?.product !== 'premium') return;
+
+    (async () => {
+      try {
+        if (!API_BASE_URL) return;
+        const resp = await fetch(`${API_BASE_URL}/api/spotify/pause`, {
+          method: 'PUT',
+          credentials: 'include'
+        });
+        if (resp.ok) {
+          console.info('Local playback paused after joining party to avoid duplicate audio');
+        } else {
+          const txt = await resp.text();
+          console.warn('Pause on join party returned non-ok:', txt);
+        }
+      } catch (err) {
+        console.warn('Failed to pause local playback when joining party:', err);
+      }
+    })();
+  }, [isSyncedWithParty, user?.product, API_BASE_URL]);
 
   const formatTime = (ms) => {
     const minutes = Math.floor(ms / 60000);
@@ -990,16 +1078,13 @@ const PlayerControls = () => {
                 }}
               />
               <IconButton 
-                onClick={async (e) => {
+                onClick={(e) => {
                   // React pools synthetic events — capture the anchor before any await
                   const anchor = e.currentTarget;
-                  try {
-                    // Fetch devices on demand when opening the menu
-                    await fetchDevices();
-                  } catch (err) {
-                    console.warn('Erreur lors du fetchDevices on open:', err);
-                  }
+                  // Open the menu immediately for snappier UX and fetch devices in background
                   setDeviceMenuAnchor(anchor);
+                  // Fetch devices but do not block UI; errors are logged
+                  try { fetchDevices(); } catch (err) { console.warn('Erreur lors du fetchDevices on open:', err); }
                 }}
                 size="small"
                 sx={{ color: 'text.secondary' }}
@@ -1013,33 +1098,46 @@ const PlayerControls = () => {
               open={Boolean(deviceMenuAnchor)}
               onClose={() => setDeviceMenuAnchor(null)}
             >
-              {devices.map(device => (
-                <MenuItem 
-                  key={device.id}
-                  onClick={() => handleDeviceChange(device.id)}
-                  selected={device.is_active}
-                >
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <span>{getDeviceIcon(device.type)}</span>
-                    <Box>
-                      <Typography variant="body2">
-                        {device.name}
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        {device.type} - {device.volume_percent}%
-                      </Typography>
-                    </Box>
-                    {device.is_active && (
-                      <Chip 
-                        label="Actif" 
-                        size="small" 
-                        color="primary" 
-                        sx={{ ml: 1 }}
-                      />
-                    )}
+              {devicesLoading ? (
+                <MenuItem disabled>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1 }}>
+                    <CircularProgress size={20} />
+                    <Typography variant="body2">Chargement des appareils…</Typography>
                   </Box>
                 </MenuItem>
-              ))}
+              ) : devices.length === 0 ? (
+                <MenuItem disabled>
+                  <Typography variant="body2">Aucun appareil trouvé</Typography>
+                </MenuItem>
+              ) : (
+                devices.map(device => (
+                  <MenuItem 
+                    key={device.id}
+                    onClick={() => handleDeviceChange(device.id)}
+                    selected={device.is_active}
+                  >
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <span>{getDeviceIcon(device.type)}</span>
+                      <Box>
+                        <Typography variant="body2">
+                          {device.name}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {device.type} - {device.volume_percent}%
+                        </Typography>
+                      </Box>
+                      {device.is_active && (
+                        <Chip 
+                          label="Actif" 
+                          size="small" 
+                          color="primary" 
+                          sx={{ ml: 1 }}
+                        />
+                      )}
+                    </Box>
+                  </MenuItem>
+                ))
+              )}
             </Menu>
           </Box>
           </>
