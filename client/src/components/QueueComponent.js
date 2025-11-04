@@ -10,13 +10,12 @@ import {
   Box,
   Chip
 } from '@mui/material';
-import { Remove, MusicNote, PlayArrow } from '@mui/icons-material';
+import { Remove, MusicNote, PlayArrow, DragIndicator } from '@mui/icons-material';
 import { useSocket } from '../contexts/SocketContext';
 import { useAuth } from '../contexts/AuthContext';
-import axios from 'axios';
 
 const QueueComponent = () => {
-  const { playbackState, partyState, isSyncedWithParty, emitTrackRemovedFromQueue } = useSocket();
+  const { playbackState, partyState, isSyncedWithParty, emitTrackRemovedFromQueue, socket } = useSocket();
   const { API_BASE_URL } = useAuth();
   // Effective fetcher: party fetcher preferred, otherwise solo playback fetcher
   const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
@@ -25,6 +24,50 @@ const QueueComponent = () => {
   // Guard: activeState may be undefined while the socket/context initializes.
   // Provide a default empty queue to avoid runtime destructure errors.
   const { queue = [] } = activeState || {};
+
+  const [draggedIndex, setDraggedIndex] = React.useState(null);
+  const [dragOverIndex, setDragOverIndex] = React.useState(null);
+
+  const handleDragStart = (e, index) => {
+    e.dataTransfer.effectAllowed = 'move';
+    setDraggedIndex(index);
+  };
+
+  const handleDragOver = (e, index) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (index !== dragOverIndex) {
+      setDragOverIndex(index);
+    }
+  };
+
+  const handleDragLeave = () => {
+    setDragOverIndex(null);
+  };
+
+  const handleDrop = (e, dropIndex) => {
+    e.preventDefault();
+    setDragOverIndex(null);
+    
+    if (draggedIndex === null || draggedIndex === dropIndex) {
+      setDraggedIndex(null);
+      return;
+    }
+
+    // Emit socket event to reorder queue
+    socket?.emit('reorder_queue', {
+      fromIndex: draggedIndex,
+      toIndex: dropIndex,
+      isParty: isSyncedWithParty
+    });
+    
+    setDraggedIndex(null);
+  };
+
+  const handleDragEnd = () => {
+    setDraggedIndex(null);
+    setDragOverIndex(null);
+  };
 
   const handleRemoveFromQueue = (trackId) => {
     console.log('🗑️ Suppression de la queue:', trackId);
@@ -35,12 +78,18 @@ const QueueComponent = () => {
     console.log('▶️ Tentative de lecture du track:', track.name);
     
     try {
-      await axios.post(`${API_BASE_URL}/api/spotify/play-track`, {
-        uri: track.uri
-      }, {
-        withCredentials: true,
-        headers: { 'Content-Type': 'application/json' }
+      const response = await fetch(`${API_BASE_URL}/api/spotify/play-track`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ uri: track.uri })
       });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Erreur lors de la lecture');
+      }
+      
       console.log('✅ Track joué avec succès:', track.name);
       // Après une lecture réussie, demander la suppression de la piste de la file d'attente
       try {
@@ -51,7 +100,7 @@ const QueueComponent = () => {
       }
     } catch (error) {
       console.error('❌ Erreur lors de la lecture du track:', error);
-      alert('Erreur: ' + (error.response?.data?.error || 'Impossible de jouer cette chanson'));
+      alert('Erreur: ' + error.message);
     }
   };
 
@@ -159,27 +208,44 @@ const QueueComponent = () => {
               },
             },
           }}>
-            {queue.map((track, index) => (
+            {queue.map((track, index) => {
+              const isDragging = draggedIndex === index;
+              const isDragOver = dragOverIndex === index;
+              
+              return (
               <ListItem
                 key={track.id}
                 className="queue-item"
+                draggable
+                onDragStart={(e) => handleDragStart(e, index)}
+                onDragOver={(e) => handleDragOver(e, index)}
+                onDragLeave={handleDragLeave}
+                onDrop={(e) => handleDrop(e, index)}
+                onDragEnd={handleDragEnd}
                 sx={{
                   borderRadius: 1,
                   mb: { xs: 1, sm: 1 },
                   px: { xs: 1, sm: 2 },
                   py: { xs: 1.5, sm: 1.5 },
-                  backgroundColor: 'rgba(29, 185, 84, 0.1)',
-                  border: '1px solid rgba(29, 185, 84, 0.2)',
+                  backgroundColor: isDragging 
+                    ? 'rgba(29, 185, 84, 0.3)' 
+                    : isDragOver 
+                    ? 'rgba(29, 185, 84, 0.25)'
+                    : 'rgba(29, 185, 84, 0.1)',
+                  border: isDragOver 
+                    ? '2px dashed rgba(29, 185, 84, 0.6)' 
+                    : '1px solid rgba(29, 185, 84, 0.2)',
+                  opacity: isDragging ? 0.5 : 1,
                   '&:hover': {
                     backgroundColor: 'rgba(29, 185, 84, 0.2)',
-                    transform: 'translateY(-1px)',
+                    transform: isDragging ? 'none' : 'translateY(-1px)',
                     transition: 'all 0.2s ease'
                   },
                   '&:active': {
                     transform: 'translateY(0px)',
                     backgroundColor: 'rgba(29, 185, 84, 0.25)',
                   },
-                  cursor: 'pointer'
+                  cursor: isDragging ? 'grabbing' : 'grab'
                 }}
                 secondaryAction={
                   <Box sx={{ 
@@ -241,6 +307,16 @@ const QueueComponent = () => {
                   </Box>
                 }
               >
+                <DragIndicator 
+                  sx={{ 
+                    mr: { xs: 0.5, sm: 1 },
+                    color: 'rgba(255, 255, 255, 0.3)',
+                    cursor: 'grab',
+                    '&:active': {
+                      cursor: 'grabbing'
+                    }
+                  }} 
+                />
                 <ListItemAvatar>
                   <Avatar
                     src={track.image}
@@ -352,7 +428,8 @@ const QueueComponent = () => {
                   }}
                 />
               </ListItem>
-            ))}
+              );
+            })}
           </List>
         </>
       ) : (

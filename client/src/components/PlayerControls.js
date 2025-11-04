@@ -354,13 +354,18 @@ const PlayerControls = () => {
         const isNewTrack = lastSeenPartyTrackRef.current?.id !== partyTrack.id;
         
         if (isNewTrack) {
+          // Immediately update state for new track to prevent oscillation
+          lastSeenPartyTrackRef.current = partyTrack;
+          setCurrentTrack(partyTrack);
+          setDuration(partyTrack.duration_ms || 0);
+          
+          // Then enrich metadata asynchronously (album images)
           (async () => {
-            lastSeenPartyTrackRef.current = partyTrack;
-            // Attempt to enrich track metadata (album images) if missing
             const enriched = await fetchTrackDetails(partyTrack);
-            lastSeenPartyTrackRef.current = enriched || partyTrack;
-            setCurrentTrack(enriched || partyTrack);
-            setDuration(partyTrack.duration_ms || 0);
+            if (enriched) {
+              lastSeenPartyTrackRef.current = enriched;
+              setCurrentTrack(enriched);
+            }
           })();
         }
         
