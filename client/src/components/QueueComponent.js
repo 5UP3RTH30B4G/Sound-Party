@@ -16,11 +16,9 @@ import { useAuth } from '../contexts/AuthContext';
 
 const QueueComponent = () => {
   const { playbackState, partyState, isSyncedWithParty, emitTrackRemovedFromQueue, socket } = useSocket();
-  const { API_BASE_URL } = useAuth();
-  // Effective fetcher: party fetcher preferred, otherwise solo playback fetcher
-  const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
+  const { API_BASE_URL, user } = useAuth();
   const activeState = isSyncedWithParty ? partyState : playbackState;
-  const isAllowed = isSyncedWithParty || !!effectiveFetcher;
+  const isAllowed = isSyncedWithParty || user?.product === 'premium';
   // Guard: activeState may be undefined while the socket/context initializes.
   // Provide a default empty queue to avoid runtime destructure errors.
   const { queue = [] } = activeState || {};
@@ -76,7 +74,22 @@ const QueueComponent = () => {
 
   const handlePlayTrack = async (track) => {
     console.log('▶️ Tentative de lecture du track:', track.name);
-    
+    // In Party mode we must instruct the server to start party playback so
+    // that all synced clients receive the play instruction. For Solo mode we
+    // keep the existing behavior which attempts to play on the local account
+    // via the server API (using session cookies).
+    if (isSyncedWithParty) {
+      try {
+        // Ask the server to play this specific track from the party queue
+        socket?.emit('play_specific_from_queue', { trackId: track.id });
+        console.log('ℹ️ Emitted play_specific_from_queue for', track.id);
+      } catch (err) {
+        console.error('❌ Failed to emit play_specific_from_queue:', err);
+        alert('Erreur lors de la demande de lecture en mode Party');
+      }
+      return;
+    }
+
     try {
       const response = await fetch(`${API_BASE_URL}/api/spotify/play-track`, {
         method: 'POST',
@@ -133,7 +146,7 @@ const QueueComponent = () => {
       minHeight: 0,
       position: 'relative'
     }}>      
-      {/* Restriction overlay like in SearchComponent: only allow queue interactions when a fetcher is active or in Party mode */}
+      {/* Restriction overlay: allow queue interactions in Party mode or for premium users in Solo */}
       {(() => {
         if (!isAllowed) {
           return (
@@ -151,8 +164,8 @@ const QueueComponent = () => {
               borderRadius: 1,
               p: 2
             }}>
-              <Typography variant="h6" sx={{ color: 'warning.main', textAlign: 'center' }}>
-                🎵 File D'attente disponible uniquement si un fetcher est actif ou en mode Party
+                <Typography variant="h6" sx={{ color: 'warning.main', textAlign: 'center' }}>
+                🎵 File d'attente disponible uniquement en mode Party ou pour les utilisateurs premium
               </Typography>
             </Box>
           );
@@ -178,14 +191,6 @@ const QueueComponent = () => {
               {queue.length} chanson{queue.length > 1 ? 's' : ''} en attente
             </Typography>
             
-              {effectiveFetcher && (
-                <Chip
-                  label={`Fetcher: ${effectiveFetcher.name || 'actif'}`}
-                  size="small"
-                  color="info"
-                  sx={{ ml: 1, height: 26, fontSize: '0.7rem' }}
-                />
-              )}
           </Box>
           
           <List sx={{ 

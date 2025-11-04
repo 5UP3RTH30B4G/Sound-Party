@@ -323,12 +323,7 @@ router.post('/previous', requireAuth, async (req, res) => {
 });
 
 // Rechercher des chansons
-// This endpoint accepts authenticated requests as before, but if the requester
-// is not authenticated we allow the server to perform the search using the
-// current party fetcher session (if one exists). That enables solo clients to
-// use the fetcher for searches when the UI allowed it.
 router.get('/search', async (req, res) => {
-  // Note: unauthenticated searches may use the fetcher session; log for debugging
   logSpotifyCall(req, '/search');
   const { q, type = 'track', limit = 20 } = req.query;
 
@@ -346,25 +341,8 @@ router.get('/search', async (req, res) => {
       if (session && session.access_token) access_token = session.access_token;
     }
 
-    // If still no access token, try to use the active party fetcher's session
     if (!access_token) {
-      try {
-        const playbackState = socketHandler.getPlaybackState();
-        if (playbackState && playbackState.fetcher && playbackState.fetcher.sessionId) {
-          const fsess = sessionManager.getSession(playbackState.fetcher.sessionId);
-          if (fsess && fsess.access_token) {
-            access_token = fsess.access_token;
-            sessionId = playbackState.fetcher.sessionId;
-            if (typeof shouldLog === 'function' ? shouldLog('search_using_fetcher') : true) console.log('ℹ️ Using fetcher session for unauthenticated search');
-          }
-        }
-      } catch (err) {
-        // ignore — fallback to auth failure below
-      }
-    }
-
-    if (!access_token) {
-      return res.status(401).json({ error: 'Not authenticated and no fetcher available' });
+      return res.status(401).json({ error: 'Not authenticated' });
     }
 
     const response = await callSpotify({
@@ -631,8 +609,6 @@ router.get('/internal/spotify-counters', (req, res) => {
 });
 
 // Obtenir les métadonnées d'un track (utilisable même si le client n'est pas authentifié)
-// This endpoint will try to resolve an access token from the request like /search
-// and will fall back to the active party fetcher session if available.
 router.get('/track/:id', async (req, res) => {
   logSpotifyCall(req, '/track/:id');
   const trackId = req.params.id;
@@ -648,25 +624,9 @@ router.get('/track/:id', async (req, res) => {
       if (session && session.access_token) access_token = session.access_token;
     }
 
-    // If still no access token, try the active party fetcher
+    // If no access token is available, require authentication
     if (!access_token) {
-      try {
-        const playbackState = socketHandler.getPlaybackState();
-        if (playbackState && playbackState.fetcher && playbackState.fetcher.sessionId) {
-          const fsess = sessionManager.getSession(playbackState.fetcher.sessionId);
-          if (fsess && fsess.access_token) {
-            access_token = fsess.access_token;
-            sessionId = playbackState.fetcher.sessionId;
-            if (typeof shouldLog === 'function' ? shouldLog('track_using_fetcher') : true) console.log('ℹ️ Using fetcher session for unauthenticated track lookup');
-          }
-        }
-      } catch (e) {
-        // ignore
-      }
-    }
-
-    if (!access_token) {
-      return res.status(401).json({ error: 'Not authenticated and no fetcher available' });
+      return res.status(401).json({ error: 'Not authenticated' });
     }
 
     const response = await callSpotify({

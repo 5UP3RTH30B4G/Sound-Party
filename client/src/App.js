@@ -6,6 +6,7 @@ import { io } from 'socket.io-client';
 
 import LoginPage from './components/LoginPage';
 import MainApp from './components/MainApp';
+import AdminSimulator from './components/AdminSimulator';
 import { AuthProvider } from './contexts/AuthContext';
 import { SocketProvider } from './contexts/SocketContext';
 import './styles/theme.css';
@@ -57,10 +58,11 @@ function App() {
         <SocketProvider socket={socket}>
           <Router>
             <div className="App app-shell">
-              <Routes>
-                <Route path="/login" element={<LoginPage />} />
-                <Route path="/" element={<MainApp />} />
-              </Routes>
+                  <Routes>
+                    <Route path="/login" element={<LoginPage />} />
+                    <Route path="/admin-sim" element={<AdminSimulator />} />
+                    <Route path="/" element={<MainApp />} />
+                  </Routes>
             </div>
           </Router>
         </SocketProvider>

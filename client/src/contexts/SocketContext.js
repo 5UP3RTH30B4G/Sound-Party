@@ -19,14 +19,12 @@ export const SocketProvider = ({ children, socket }) => {
     currentTrack: null,
     position: 0,
     queue: [],
-    fetcher: null
   });
   const [partyState, setPartyState] = useState({
     isPlaying: false,
     currentTrack: null,
     position: 0,
     queue: [],
-    fetcher: null
   });
   const [isSyncedWithParty, setIsSyncedWithParty] = useState(false);
   const [messages, setMessages] = useState([]);
@@ -90,17 +88,9 @@ export const SocketProvider = ({ children, socket }) => {
     socket.on('playback_state_updated', (state) => {
       try {
         // If the client is synced with the party, avoid applying solo playback
-        // updates unless this client is the designated fetcher. This prevents
-        // local/solo updates from briefly overriding party UI.
-        const effectiveFetcherFromState = state?.fetcher;
-        const effectiveFetcher = effectiveFetcherFromState || (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
-        const amIFetcher = effectiveFetcher && (effectiveFetcher.spotifyId === user?.id || effectiveFetcher.name === user?.display_name);
-
-        if (isSyncedWithParty && !amIFetcher) {
-          // ignore solo playback update while following a party
-          if (process.env.NODE_ENV !== 'development') {
-            console.log('Ignored solo playback_state_updated because client is synced with party and not fetcher');
-          }
+        // updates — while following a party, local/solo updates should not override party UI.
+        if (isSyncedWithParty) {
+          if (process.env.NODE_ENV !== 'development') console.log('Ignored solo playback_state_updated because client is synced with party');
         } else {
           setPlaybackState(state);
         }
@@ -114,8 +104,7 @@ export const SocketProvider = ({ children, socket }) => {
           console.log('socket: playback_state_updated (detail):', JSON.stringify({
             currentTrack: state?.currentTrack?.name || null,
             position: state?.position,
-            isPlaying: state?.isPlaying,
-            fetcher: state?.fetcher || null
+            isPlaying: state?.isPlaying
           }));
         } catch (e) { console.log('socket: playback_state_updated (raw):', state); }
       }
@@ -128,8 +117,7 @@ export const SocketProvider = ({ children, socket }) => {
             currentTrack: state?.currentTrack?.name || null,
             position: state?.position,
             isPlaying: state?.isPlaying,
-            queueLength: state?.queue?.length || 0,
-            fetcher: state?.fetcher || null
+            queueLength: state?.queue?.length || 0
           }));
         } catch (e) { /* ignore stringify errors */ }
       }
@@ -177,20 +165,30 @@ export const SocketProvider = ({ children, socket }) => {
       addSystemMessage(`${data.user} ${data.message}`, 'info');
     });
 
-    // Événement pour jouer automatiquement une chanson de la queue
+    // Événement pour jouer une chanson provenant de la queue (auto ou manuel)
     socket.on('play_track_from_queue', async (data) => {
-      console.log('🎵 Demande de lecture automatique:', data.track.name);
-      addSystemMessage(`🎵 Lecture automatique: "${data.track.name}"`, 'success');
-      
-      // Émettre un événement pour que PlayerControls gère la lecture
-      window.dispatchEvent(new CustomEvent('autoPlayTrackFromQueue', {
-        detail: { track: data.track, requestedBy: data.requestedBy }
-      }));
+      try {
+        const trigger = data?.trigger || 'auto';
+        const trackName = data?.track?.name || 'unknown';
+
+        if (trigger === 'manual') {
+          addSystemMessage(`${data.requestedBy || 'Utilisateur'} a lancé la lecture: "${trackName}"`, 'info');
+        } else {
+          addSystemMessage(`🎵 Lecture automatique: "${trackName}"`, 'success');
+        }
+
+        // Émettre un événement pour que PlayerControls gère la lecture
+        window.dispatchEvent(new CustomEvent('autoPlayTrackFromQueue', {
+          detail: { track: data.track, requestedBy: data.requestedBy, trigger }
+        }));
+      } catch (err) {
+        console.warn('Erreur handling play_track_from_queue:', err);
+      }
     });
 
-    // Handler: perform_playback_control (server forwards control requests to the fetcher client)
+    // Handler: perform_playback_control (server forwarded control request)
     socket.on('perform_playback_control', async (data) => {
-      console.log('🔁 perform_playback_control reçu (fetcher):', data);
+      console.log('🔁 perform_playback_control reçu:', data);
       addSystemMessage(`🔁 Exécution action demandée par ${data.requestedBy}: ${data.action.type}`, 'info');
 
       try {
@@ -456,8 +454,18 @@ export const SocketProvider = ({ children, socket }) => {
 
   const emitPlayNextFromQueue = () => {
     if (socket && authenticated) {
-      console.log('🎵 Demande de lecture automatique de la prochaine chanson');
-      socket.emit('play_next_from_queue');
+      try {
+        console.log('🎵 Demande de lecture automatique de la prochaine chanson (emitPlayNextFromQueue)');
+        // Add debug info about party state to help trace why server may ignore
+        try { console.log('emitPlayNextFromQueue debug:', {
+          partyPos: partyState?.position,
+          partyCurrent: partyState?.currentTrack?.name,
+          partyQueueLen: Array.isArray(partyState?.queue) ? partyState.queue.length : undefined
+        }); } catch (e) {}
+        socket.emit('play_next_from_queue');
+      } catch (err) {
+        console.warn('Erreur emitPlayNextFromQueue:', err);
+      }
     }
   };
 

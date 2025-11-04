@@ -63,7 +63,14 @@ export const AuthProvider = ({ children }) => {
       
       if (response.data.authenticated) {
         console.log('✅ Utilisateur authentifié:', response.data.user?.display_name);
-        setUser(response.data.user);
+        // Allow local simulation of non-premium for admin testing via localStorage flag
+        const sim = (() => { try { return localStorage.getItem('simulate_non_premium') === '1'; } catch(e){ return false; } })();
+        const serverUser = response.data.user || {};
+        if (sim) {
+          // force a non-premium product locally for simulation
+          serverUser.product = 'free';
+        }
+        setUser(serverUser);
         setAuthenticated(true);
       } else {
         console.log('❌ Utilisateur non authentifié - reason:', response.data.reason || 'non spécifiée');

@@ -20,7 +20,7 @@ const SearchComponent = ({ onTrackQueued }) => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
-  const { API_BASE_URL } = useAuth();
+  const { API_BASE_URL, user } = useAuth();
   const { socket, playbackState, partyState, isSyncedWithParty } = useSocket();
 
   const emitTrackQueued = useCallback((track) => {
@@ -161,10 +161,8 @@ const SearchComponent = ({ onTrackQueued }) => {
       overflow: 'hidden',
       position: 'relative'
     }}>
-      {/* Allow searching/queuing when there's an active fetcher even in Solo mode */}
       {(() => {
-        const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
-        const isAllowed = isSyncedWithParty || !!effectiveFetcher;
+        const isAllowed = isSyncedWithParty || user?.product === 'premium';
         if (!isAllowed) {
           return (
             <Box sx={{
@@ -181,7 +179,7 @@ const SearchComponent = ({ onTrackQueued }) => {
               borderRadius: 1
             }}>
               <Typography variant="h6" sx={{ color: 'warning.main', textAlign: 'center', px: 2 }}>
-                🔍 Recherche disponible uniquement si un fetcher est actif ou en mode Party
+                🔍 Recherche disponible uniquement en mode Party ou pour les utilisateurs premium
               </Typography>
             </Box>
           );
@@ -196,8 +194,7 @@ const SearchComponent = ({ onTrackQueued }) => {
         placeholder="Rechercher des musiques..."
         value={query}
         disabled={(() => {
-          const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
-          return !(isSyncedWithParty || !!effectiveFetcher);
+          return !(isSyncedWithParty || user?.product === 'premium');
         })()}
         onChange={(e) => {
           setQuery(e.target.value);

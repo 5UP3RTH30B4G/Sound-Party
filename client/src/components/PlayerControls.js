@@ -62,13 +62,10 @@ const PlayerControls = () => {
   // Récupérer l'état de lecture depuis Spotify API (logique originale)
   const fetchPlaybackState = useCallback(async () => {
     if (!API_BASE_URL || !refreshToken || rateLimited) return;
-    // If we're in Party mode, only the designated fetcher client should call Spotify.
-    try {
-      const amIFetcher = activeState?.fetcher && (activeState.fetcher.spotifyId === user?.id || activeState.fetcher.name === user?.display_name);
-      if (isSyncedWithParty && !amIFetcher) return;
-    } catch (e) {
-      // ignore and continue if we can't determine fetcher yet
-    }
+    // Polling rules: do not poll while synced with a party; only premium users
+    // may poll in Solo mode (non-premium users are restricted to Party mode).
+    if (isSyncedWithParty) return;
+    if (user?.product !== 'premium') return;
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/spotify/playback-state`, {
@@ -137,8 +134,7 @@ const PlayerControls = () => {
           emitPlaybackStateChange({
             currentTrack: data.item,
             isPlaying: data.is_playing,
-            position: data.progress_ms || 0,
-            fetcher: null
+            position: data.progress_ms || 0
           });
         } else {
           // Aucune musique en cours
@@ -193,19 +189,12 @@ const PlayerControls = () => {
   // Récupérer les appareils disponibles
   const fetchDevices = useCallback(async () => {
     // Only attempt to fetch devices when this client is allowed to poll Spotify.
-    // In Party mode only the fetcher should call Spotify; otherwise allow fetcher or premium users.
+    // We do not poll in Party mode. In Solo mode only premium users may poll.
     if (!API_BASE_URL || !refreshToken || rateLimited) return;
-    try {
-      const amIFetcher = activeState?.fetcher && (activeState.fetcher.spotifyId === user?.id || activeState.fetcher.name === user?.display_name);
-      const noFetcher = !activeState?.fetcher;
-      let canFetch;
-      if (isSyncedWithParty) {
-        canFetch = !!amIFetcher;
-      } else {
-        canFetch = amIFetcher || (noFetcher && user?.product === 'premium');
-      }
-      if (!canFetch) return;
+    const canFetch = !isSyncedWithParty && user?.product === 'premium';
+    if (!canFetch) return;
 
+    try {
       const response = await fetch(`${API_BASE_URL}/api/spotify/devices`, {
         credentials: 'include'
       });
@@ -271,20 +260,9 @@ const PlayerControls = () => {
 
   // Appel Périodique Playback + Devices
   useEffect(() => {
-    const amIFetcher = activeState?.fetcher && (activeState.fetcher.spotifyId === user?.id || activeState.fetcher.name === user?.display_name);
-    const noFetcher = !activeState?.fetcher;
-    // When synced with a party, only the fetcher should poll Spotify directly.
-    let canFetch;
-    if (isSyncedWithParty) {
-      canFetch = !!amIFetcher;
-    } else {
-      canFetch = amIFetcher || (noFetcher && user?.product === 'premium');
-    }
-
-    if (!canFetch) {
-      // If we're not allowed to fetch, rely on socket updates only
-      return;
-    }
+    // When synced with a party, do not poll; in Solo mode only premium users poll.
+    const canFetch = !isSyncedWithParty && user?.product === 'premium';
+    if (!canFetch) return;
 
     // respect server-side rate limiting
     if (serverRateLimitedMs && serverRateLimitedMs > 0) return;
@@ -302,7 +280,7 @@ const PlayerControls = () => {
         scheduledRef.current = null;
       }
     };
-  }, [fetchPlaybackState, fetchDevices, rateLimited, activeState, user, performThrottledFetch, serverRateLimitedMs, isSyncedWithParty]);
+  }, [fetchPlaybackState, fetchDevices, rateLimited, user, performThrottledFetch, serverRateLimitedMs, isSyncedWithParty]);
 
   // Synchroniser avec les événements socket.
   // En mode Party, n'afficher une piste actuelle que si elle provient de la file d'attente partagée.
@@ -406,16 +384,14 @@ const PlayerControls = () => {
   // to correct any position drift that occurred while synced to the party.
   useEffect(() => {
     if (!isSyncedWithParty) {
-      // We're now in Solo mode — refresh local playback info
+      // We're now in Solo mode — refresh local playback info for premium users
       try {
         fetchPlaybackState();
       } catch (err) {
         console.warn('Erreur en récupérant l\'état après sortie du mode Party:', err);
       }
     }
-  }, [isSyncedWithParty, fetchPlaybackState, activeState?.fetcher?.spotifyId, activeState?.fetcher?.name]);
-  // Note: include activeState.fetcher identifiers because fetchPlaybackState logic
-  // uses them to decide whether this client is allowed to poll the Spotify API.
+  }, [isSyncedWithParty, fetchPlaybackState]);
 
   // Estimate current position using the last known playbackState position + elapsed time
   useEffect(() => {
@@ -447,13 +423,10 @@ const PlayerControls = () => {
     }
 
     // When playbackState updates, capture its baseline position and timestamp
-    // Only take baseline playback position from server when this client is allowed
-    // to see full playback info (fetcher) or when there is no fetcher and the user is premium.
-    const amIFetcher = activeState?.fetcher && (activeState.fetcher.spotifyId === user?.id || activeState.fetcher.name === user?.display_name);
-    const noFetcher = !activeState?.fetcher;
-    const canUsePlaybackState = amIFetcher || (noFetcher && user?.product === 'premium');
+  // Only use server-provided baseline when in Solo mode and the user is premium.
+  const canUsePlaybackState = !isSyncedWithParty && user?.product === 'premium';
 
-    if (canUsePlaybackState && activeState && activeState.position !== undefined) {
+  if (canUsePlaybackState && activeState && activeState.position !== undefined) {
       basePositionRef.current = activeState.position || 0;
       lastPlaybackUpdateRef.current = Date.now();
       try {
@@ -610,7 +583,7 @@ const PlayerControls = () => {
       }
       try { console.log('estimator interval cleared'); } catch (e) {}
     };
-  }, [isPlaying, currentTrack, duration, playbackState, partyState, isSyncedWithParty, emitPlayNextFromQueue, baselineReady, activeState, emitPlaybackControl, user?.id, user?.display_name, user?.product]);
+  }, [isPlaying, currentTrack, duration, playbackState, partyState, isSyncedWithParty, emitPlayNextFromQueue, baselineReady, emitPlaybackControl, user?.id, user?.display_name, user?.product]);
 
   // Écouter l'événement CustomEvent 'autoPlayTrackFromQueue' dispatché par SocketContext
   useEffect(() => {
@@ -623,11 +596,10 @@ const PlayerControls = () => {
 
         console.log('🎵 autoPlayTrackFromQueue reçu pour:', track.name, 'demandé par', requestedBy);
 
-        // Gate: only the fetcher or a premium user should attempt to call Spotify API directly
-        const amIFetcher = activeState?.fetcher && (activeState.fetcher.spotifyId === user?.id || activeState.fetcher.name === user?.display_name);
-        const canAttemptPlay = amIFetcher || user?.product === 'premium';
+            // Gate: only premium users should attempt to call Spotify API directly
+            const canAttemptPlay = user?.product === 'premium';
 
-        if (!canAttemptPlay) {
+            if (!canAttemptPlay) {
           // Not authorized to perform the play; just refresh state later to reflect server-side actions
           console.log('ℹ️ Pas autorisé à jouer localement, demande au serveur de jouer. Rafraîchissement d\'état prévu.');
           setTimeout(fetchPlaybackState, 1000);
@@ -665,6 +637,37 @@ const PlayerControls = () => {
     window.addEventListener('autoPlayTrackFromQueue', handler);
     return () => window.removeEventListener('autoPlayTrackFromQueue', handler);
   }, [API_BASE_URL, fetchPlaybackState, playbackState, user, emitTrackRemovedFromQueue, activeState, emitPlaybackControl, user?.id, user?.display_name, user?.product]);
+
+  // Party-mode auto-skip: when following a party, periodically check the
+  // server-provided position and emit play_next_from_queue when near the end.
+  useEffect(() => {
+    if (!isSyncedWithParty) return;
+
+    const partyAutoInterval = setInterval(() => {
+      try {
+        const now = Date.now();
+        const pos = (partyState && typeof partyState.position === 'number') ? partyState.position : 0;
+        const dur = (partyState && partyState.currentTrack && partyState.currentTrack.duration_ms) ? partyState.currentTrack.duration_ms : duration || 0;
+        const queueLength = (partyState && Array.isArray(partyState.queue)) ? partyState.queue.length : 0;
+        const threshold = Math.max(0, dur - END_MARGIN_MS);
+        const cooldownPassed = (now - (lastAutoPlayRequestRef.current || 0)) >= COOLDOWN_MS;
+
+        if (dur > 0 && queueLength > 0 && cooldownPassed && pos >= threshold) {
+          try {
+            console.info('⏭️ party auto-skip condition met — emitting play_next_from_queue', { pos, dur, queueLength });
+            if (emitPlayNextFromQueue) emitPlayNextFromQueue();
+            lastAutoPlayRequestRef.current = now;
+          } catch (e) {
+            console.warn('Erreur lors de l\'émission play_next_from_queue (party auto-skip):', e);
+          }
+        }
+      } catch (e) {
+        // ignore per-interval errors
+      }
+    }, 500);
+
+    return () => clearInterval(partyAutoInterval);
+  }, [isSyncedWithParty, partyState, emitPlayNextFromQueue, duration]);
 
   const handlePlayPause = async () => {
     if (serverRateLimitedMs && serverRateLimitedMs > 0) return;
@@ -834,14 +837,6 @@ const PlayerControls = () => {
   return (
     <Card sx={{ mb: 2 }}>
       <CardContent>
-        {/* Debug info visible in development to help track party sync state */}
-        {process.env.NODE_ENV !== 'production' && (
-          <Box sx={{ mb: 1 }}>
-            <Typography variant="caption" color="text.secondary">
-              {`DEBUG: isSyncedWithParty=${String(isSyncedWithParty)} | partyTrack=${partyState?.currentTrack?.name || 'none'} | playbackTrack=${playbackState?.currentTrack?.name || 'none'}`}
-            </Typography>
-          </Box>
-        )}
         {currentTrack ? (
           <>
             <Grid container spacing={2} alignItems="center">

@@ -14,12 +14,14 @@ import {
 } from '@mui/material';
 import { Search, Add } from '@mui/icons-material';
 import { useSocket } from '../contexts/SocketContext';
+import { useAuth } from '../contexts/AuthContext';
 
 const SearchComponent = ({ onTrackQueued }) => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const { socket, isSyncedWithParty, playbackState, partyState } = useSocket();
+  const { user } = useAuth();
 
   const emitTrackQueued = useCallback((track) => {
     if (socket) {
@@ -121,7 +123,7 @@ const SearchComponent = ({ onTrackQueued }) => {
       overflow: 'hidden',
       position: 'relative'
     }}>
-      {!(isSyncedWithParty || ((partyState && partyState.fetcher) || (playbackState && playbackState.fetcher))) && (
+  {!(isSyncedWithParty || user?.product === 'premium') && (
         <Box sx={{
           position: 'absolute',
           top: 0,
@@ -142,12 +144,12 @@ const SearchComponent = ({ onTrackQueued }) => {
       )}
       
       {/* Barre de recherche optimisée pour mobile */}
-        <TextField
+  <TextField
         fullWidth
         variant="outlined"
         placeholder="Rechercher des musiques..."
         value={query}
-        disabled={!(isSyncedWithParty || ((partyState && partyState.fetcher) || (playbackState && playbackState.fetcher)))}
+  disabled={!(isSyncedWithParty || user?.product === 'premium')}
         onChange={(e) => {
           setQuery(e.target.value);
           if (e.target.value.length > 0) {

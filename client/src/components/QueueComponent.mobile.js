@@ -18,7 +18,6 @@ import axios from 'axios';
 const QueueComponent = () => {
   const { playbackState, partyState, isSyncedWithParty, emitTrackRemovedFromQueue } = useSocket();
   const { API_BASE_URL } = useAuth();
-  const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
   const activeState = isSyncedWithParty ? partyState : playbackState;
   // Guard against undefined activeState during initialization
   const { queue = [] } = activeState || {};
@@ -100,14 +99,6 @@ const QueueComponent = () => {
               {queue.length} chanson{queue.length > 1 ? 's' : ''} en attente
             </Typography>
             
-            {effectiveFetcher && (
-              <Chip
-                label={`Fetcher: ${effectiveFetcher.name || 'actif'}`}
-                size="small"
-                color="info"
-                sx={{ ml: 1, height: 26, fontSize: '0.7rem' }}
-              />
-            )}
           </Box>
           
           <List sx={{ 

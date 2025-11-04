@@ -37,12 +37,6 @@ const ConnectedUsers = () => {
   };
 
   const getUserStatus = (user) => {
-    // Effective fetcher can live in partyState or playbackState
-    const effectiveFetcher = (partyState && partyState.fetcher) || (playbackState && playbackState.fetcher);
-    const fetcherId = effectiveFetcher?.spotifyId || effectiveFetcher?.id || effectiveFetcher;
-    if (fetcherId && (fetcherId === user.spotifyId || fetcherId === user.id || fetcherId === user.name)) {
-      return { label: 'Fetcher', color: 'primary' };
-    }
     return { label: 'Connecté', color: 'success' };
   };
 
@@ -201,16 +195,6 @@ const ConnectedUsers = () => {
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
             Total: {connectedUsers.length} utilisateur{connectedUsers.length > 1 ? 's' : ''}
           </Typography>
-          {playbackState.fetcher && (
-            <>
-              <Typography variant="caption" color="primary" sx={{ display: 'block' }}>
-                Fetcher* actif: {playbackState.fetcher?.name || playbackState.fetcher}
-              </Typography>
-              <Typography variant="caption" color="info" sx={{ display: 'block' }}>
-                *Utilisateur ou le trafic des chansons est attribué
-              </Typography>
-            </>
-          )}          
           {playbackState.queue && playbackState.queue.length > 0 && (
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
               File d'attente: {playbackState.queue.length} chanson{playbackState.queue.length > 1 ? 's' : ''}

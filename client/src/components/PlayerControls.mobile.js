@@ -348,18 +348,6 @@ const PlayerControls = () => {
                   }}>
                   {currentTrack.album?.name}
                 </Typography>
-                {playbackState.fetcher && (
-                  <Chip 
-                    label={`Géré par ${playbackState.fetcher?.name || playbackState.fetcher}`}
-                    size="small"
-                    color="primary"
-                    sx={{ 
-                      mt: 0.5, 
-                      height: { xs: 18, sm: 20 },
-                      fontSize: { xs: '0.65rem', sm: '0.75rem' }
-                    }}
-                  />
-                )}
               </Box>
             </>
           ) : (
