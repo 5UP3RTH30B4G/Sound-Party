@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import axios from 'axios';
 
 const AuthContext = createContext();
@@ -25,42 +25,17 @@ export const AuthProvider = ({ children }) => {
   axios.defaults.baseURL = API_BASE_URL;
 
   console.log('🔧 AuthContext API_BASE_URL:', API_BASE_URL, 'NODE_ENV:', process.env.NODE_ENV);
+  console.log('🔄 AuthProvider initialization will run after checkAuthStatus is declared');
 
-  useEffect(() => {
-    console.log('🔄 Initialisation AuthProvider');
-    
-    // Vérifier les paramètres URL pour détecter un retour de callback
-    const urlParams = new URLSearchParams(window.location.search);
-    const authStatus = urlParams.get('auth');
-    const userParam = urlParams.get('user');
-    
-    if (authStatus === 'success') {
-      console.log('✅ Retour de callback Spotify détecté pour:', userParam);
-      // Nettoyer l'URL
-      window.history.replaceState({}, document.title, window.location.pathname);
-      // Forcer une vérification immédiate
-      setTimeout(() => {
-        console.log('🔄 Vérification forcée après callback');
-        checkAuthStatus();
-      }, 500);
-    } else if (authStatus === 'error') {
-      console.error('❌ Erreur de callback Spotify détectée');
-      window.history.replaceState({}, document.title, window.location.pathname);
-    } else {
-      // Vérification normale
-      checkAuthStatus();
-    }
-  }, []);
-
-  const checkAuthStatus = async () => {
+  const checkAuthStatus = useCallback(async () => {
     console.log('🔍 Vérification du statut d\'authentification...');
-    
+
     try {
       const response = await axios.get(`${API_BASE_URL}/auth/status`);
       console.log('📡 Réponse du serveur:', response.data);
       console.log('📡 Status de la réponse:', response.status);
       console.log('📡 Headers de la réponse:', response.headers);
-      
+
       if (response.data.authenticated) {
         console.log('✅ Utilisateur authentifié:', response.data.user?.display_name);
         // Allow local simulation of non-premium for admin testing via localStorage flag
@@ -89,7 +64,43 @@ export const AuthProvider = ({ children }) => {
       setLoading(false);
       console.log('🔍 Vérification terminée');
     }
-  };
+  }, [API_BASE_URL]);
+
+  useEffect(() => {
+    console.log('🔄 Initialisation AuthProvider');
+
+    // Check URL for callback params from Spotify
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const authStatus = urlParams.get('auth');
+      const userParam = urlParams.get('user');
+
+      if (authStatus === 'success') {
+        console.log('✅ Spotify callback detected for:', userParam);
+        // Clean URL
+        window.history.replaceState({}, document.title, window.location.pathname);
+        // Force an immediate check shortly after redirect
+        setTimeout(() => {
+          console.log('🔄 Forced auth check after callback');
+          checkAuthStatus();
+        }, 500);
+        return;
+      }
+
+      if (authStatus === 'error') {
+        console.error('❌ Spotify callback error detected');
+        window.history.replaceState({}, document.title, window.location.pathname);
+        // still run status check to clear loading
+        checkAuthStatus();
+        return;
+      }
+    } catch (e) {
+      console.warn('⚠️ Error parsing URL params for auth callback', e);
+    }
+
+    // Default behavior: check auth status on mount
+    checkAuthStatus();
+  }, [checkAuthStatus]);
 
   const login = () => {
     console.log('🔐 Début processus de connexion Spotify');

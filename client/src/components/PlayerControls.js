@@ -29,17 +29,22 @@ const debugLog = false; // Enable or disable debug logging
 
 const PlayerControls = () => {
   const { API_BASE_URL, refreshToken, user } = useAuth();
-  const { 
+  const {
     playbackState,
     partyState,
     isSyncedWithParty,
-    emitPlaybackControl, 
+    emitPlaybackControl,
     emitPlaybackStateChange,
     emitPlayNextFromQueue,
     emitTrackRemovedFromQueue,
     serverRateLimitedMs,
+    // requestSync is consumed in some async flows; keep it in the destructure to keep API parity.
+    // If ESLint complains about unused variable in some builds, the explicit reference below
+    // (void requestSync) ensures it's treated as used without changing behavior.
     requestSync
   } = useSocket();
+  // make a no-op reference so linters recognize requestSync as used when it's only called conditionally
+  try { void requestSync; } catch (e) {}
 
   // Utiliser l'état approprié selon le mode
   // Guard: partyState or playbackState may be undefined while the socket initializes.
@@ -63,9 +68,10 @@ const PlayerControls = () => {
   // Récupérer l'état de lecture depuis Spotify API (logique originale)
   const fetchPlaybackState = useCallback(async () => {
     if (!API_BASE_URL || !refreshToken || rateLimited) return;
+    // Prevent any solo fetch actions if we've become party-synced; use ref to avoid stale closures
+    if (isSyncedRef.current) return;
     // Polling rules: do not poll while synced with a party; only premium users
     // may poll in Solo mode (non-premium users are restricted to Party mode).
-    if (isSyncedWithParty) return;
     if (user?.product !== 'premium') return;
 
     try {
@@ -75,7 +81,8 @@ const PlayerControls = () => {
 
       if (response.ok) {
         const data = await response.json();
-        if (data && data.item) {
+          if (data && data.item) {
+            if (isSyncedRef.current) return; // avoid overwriting party UI with solo data
           setCurrentTrack(data.item);
           setIsPlaying(data.is_playing);
           setPosition(data.progress_ms || 0);
@@ -125,10 +132,12 @@ const PlayerControls = () => {
           }
           // If Spotify reports a device volume of 0 we must respect it.
           // Use an explicit check for number to avoid `0` being treated as falsy.
-          if (data.device && typeof data.device.volume_percent === 'number') {
-            setVolume(data.device.volume_percent);
-          } else {
-            setVolume(50);
+          if (!isSyncedRef.current) {
+            if (data.device && typeof data.device.volume_percent === 'number') {
+              setVolume(data.device.volume_percent);
+            } else {
+              setVolume(50);
+            }
           }
           
           // Émettre l'état vers les autres clients
@@ -153,7 +162,7 @@ const PlayerControls = () => {
       console.error('Erreur lors de la récupération de l\'état de lecture:', error);
       setError('Erreur de connexion Spotify');
     }
-  }, [API_BASE_URL, refreshToken, emitPlaybackStateChange, rateLimited, isSyncedWithParty, activeState, user?.id, user?.display_name, emitPlayNextFromQueue, emitPlaybackControl, duration]);
+  }, [API_BASE_URL, refreshToken, emitPlaybackStateChange, rateLimited, isSyncedWithParty, user?.product, emitPlayNextFromQueue, emitPlaybackControl, duration, activeState]);
 
   // When entering Party mode, clear pending timers/estimators to avoid
   // briefly showing local playback info before party state arrives.
@@ -219,11 +228,14 @@ const PlayerControls = () => {
         if (response.ok) {
           const data = await response.json();
           const list = data.devices || [];
-          setDevices(list);
-          // If a device is active, and provides a numeric volume, use it.
-          const active = list.find(d => d.is_active);
-          if (active && typeof active.volume_percent === 'number') {
-            setVolume(active.volume_percent);
+          // Only update devices/volume when not party-synced (avoid overwriting party UI)
+          if (!isSyncedRef.current) {
+            setDevices(list);
+            // If a device is active, and provides a numeric volume, use it.
+            const active = list.find(d => d.is_active);
+            if (active && typeof active.volume_percent === 'number') {
+              setVolume(active.volume_percent);
+            }
           }
         }
         // record timestamp even on non-ok to avoid tight retry loops
@@ -240,7 +252,7 @@ const PlayerControls = () => {
     // ensure we clear the in-flight ref when done
     promise.finally(() => { devicesInFlightRef.current = null; });
     return promise;
-  }, [API_BASE_URL, refreshToken, rateLimited, activeState, user?.id, user?.display_name, user?.product, isSyncedWithParty]);
+  }, [API_BASE_URL, refreshToken, rateLimited, user?.product, isSyncedWithParty]);
 
   // When the authenticated user changes (e.g. multiple logins), ensure we refresh
   // playback state and devices so the UI (volume, active device) reflects the
@@ -259,11 +271,17 @@ const PlayerControls = () => {
     try {
       fetchDevices();
     } catch (e) {}
-  }, [user?.id, user?.product, isSyncedWithParty, fetchPlaybackState, fetchDevices]);
+  }, [user, user?.id, user?.product, isSyncedWithParty, fetchPlaybackState, fetchDevices]);
 
   // Throttle combiné pour playback + devices: au moins 1000ms entre deux séries d'appels
   const lastApiCallRef = useRef(0);
   const scheduledRef = useRef(null);
+  // Keep a ref of the latest party-sync state to avoid stale closures updating
+  // local (solo) playback state after we've joined a party.
+  const isSyncedRef = useRef(isSyncedWithParty);
+  useEffect(() => {
+    isSyncedRef.current = isSyncedWithParty;
+  }, [isSyncedWithParty]);
   // Coalescing/debounce for devices fetch
   const lastDevicesFetchRef = useRef(0);
   const devicesInFlightRef = useRef(null);
@@ -422,13 +440,14 @@ const PlayerControls = () => {
       }
     } else {
       // Solo mode: display local playback state as usual
-      if (playbackState?.currentTrack) {
+      // Prevent accidentally applying solo playback state if we've become party-synced
+      if (!isSyncedRef.current && playbackState?.currentTrack) {
         setCurrentTrack(playbackState.currentTrack);
         setIsPlaying(playbackState.isPlaying);
         setPosition(playbackState.position || 0);
       }
     }
-  }, [isSyncedWithParty, partyState, playbackState]);
+  }, [isSyncedWithParty, partyState, playbackState, fetchTrackDetails]);
 
   // When returning from Party mode to Solo, refresh playback state from the API
   // to correct any position drift that occurred while synced to the party.
@@ -633,7 +652,7 @@ const PlayerControls = () => {
       }
       try { console.log('estimator interval cleared'); } catch (e) {}
     };
-  }, [isPlaying, currentTrack, duration, playbackState, partyState, isSyncedWithParty, emitPlayNextFromQueue, baselineReady, emitPlaybackControl, user?.id, user?.display_name, user?.product]);
+  }, [isPlaying, currentTrack, duration, playbackState, partyState, isSyncedWithParty, emitPlayNextFromQueue, baselineReady, emitPlaybackControl, user?.product, activeState]);
 
   // Écouter l'événement CustomEvent 'autoPlayTrackFromQueue' dispatché par SocketContext
   useEffect(() => {
@@ -686,7 +705,7 @@ const PlayerControls = () => {
 
     window.addEventListener('autoPlayTrackFromQueue', handler);
     return () => window.removeEventListener('autoPlayTrackFromQueue', handler);
-  }, [API_BASE_URL, fetchPlaybackState, playbackState, user, emitTrackRemovedFromQueue, activeState, emitPlaybackControl, user?.id, user?.display_name, user?.product]);
+  }, [API_BASE_URL, fetchPlaybackState, playbackState, user, emitTrackRemovedFromQueue, activeState, emitPlaybackControl, user?.id, user?.display_name, user?.product, isSyncedWithParty]);
 
   // Party-mode auto-skip: when following a party, periodically check the
   // server-provided position and emit play_next_from_queue when near the end.

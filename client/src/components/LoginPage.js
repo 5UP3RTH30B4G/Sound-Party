@@ -19,11 +19,10 @@ const LoginPage = () => {
 
   useEffect(() => {
     // Vérifier les paramètres d'URL pour les messages de succès/erreur
-    const success = searchParams.get('success');
-    const error = searchParams.get('error');
-    const user = searchParams.get('user');
+  const success = searchParams.get('success');
+  const userParam = searchParams.get('user');
 
-    if (success === 'true' && user) {
+    if (success === 'true' && userParam) {
       // Rediriger vers l'application principale après connexion réussie
       setTimeout(() => {
         navigate('/');

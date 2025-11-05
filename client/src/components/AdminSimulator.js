@@ -14,9 +14,7 @@ const AdminSimulator = () => {
     connectedUsers,
     emitPlayNextFromQueue,
     emitTrackQueued,
-    emitTrackRemovedFromQueue,
-    emitPlaybackControl,
-    socket
+    emitTrackRemovedFromQueue
   } = useSocket();
 
   // Allow configuring the admin id via env, otherwise fallback to the developer's Spotify id

@@ -21,7 +21,7 @@ const SearchComponent = ({ onTrackQueued }) => {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const { API_BASE_URL, user } = useAuth();
-  const { socket, playbackState, partyState, isSyncedWithParty } = useSocket();
+  const { socket, playbackState, isSyncedWithParty } = useSocket();
 
   const emitTrackQueued = useCallback((track) => {
     console.log('🔌 Socket disponible:', !!socket);

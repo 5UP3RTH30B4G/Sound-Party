@@ -16,7 +16,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { Button, CircularProgress } from '@mui/material';
 
 const ConnectedUsers = () => {
-  const { connectedUsers, playbackState, partyState } = useSocket();
+  const { connectedUsers, playbackState } = useSocket();
   const { user: authUser, authenticated, refreshToken } = useAuth();
   const [refreshing, setRefreshing] = React.useState({});
 

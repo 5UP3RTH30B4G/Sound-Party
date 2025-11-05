@@ -12,7 +12,7 @@ import '../styles/theme.css';
 
 const MainApp = () => {
   const navigate = useNavigate();
-  const { user, authenticated, loading, logout, checkAuthStatus } = useAuth();
+  const { user, authenticated, loading, logout } = useAuth();
   const { connectionStatus, connectedUsers, playbackState, isSyncedWithParty, togglePartySync } = useSocket();
   const [nonPremiumAck, setNonPremiumAck] = useState(() => {
     try { return localStorage.getItem('nonPremiumAcknowledged') === '1'; } catch (e) { return false; }
