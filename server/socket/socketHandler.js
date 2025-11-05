@@ -100,6 +100,84 @@ const seekPartyPlayback = (position_ms) => {
     partyPlaybackState.playbackStartTime = Date.now();
   }
   console.log('⏩ Party seeked to position:', position_ms, 'ms');
+  // Immediately broadcast the updated party state so other synced clients update without waiting
+  try {
+    if (ioInstance) {
+      const stateToBroadcast = { ...partyPlaybackState };
+      // Calculate current position if playing
+      if (stateToBroadcast.isPlaying && stateToBroadcast.playbackStartTime) {
+        const elapsed = Date.now() - stateToBroadcast.playbackStartTime;
+        const basePosition = stateToBroadcast.pausedAt || 0;
+        stateToBroadcast.position = basePosition + elapsed;
+        if (stateToBroadcast.currentTrack && stateToBroadcast.currentTrack.duration_ms) {
+          stateToBroadcast.position = Math.min(stateToBroadcast.position, stateToBroadcast.currentTrack.duration_ms);
+        }
+      } else if (!stateToBroadcast.isPlaying && stateToBroadcast.pausedAt !== null && stateToBroadcast.pausedAt !== undefined) {
+        stateToBroadcast.position = stateToBroadcast.pausedAt;
+      }
+      ioInstance.emit('party_state_updated', stateToBroadcast);
+      // Also perform server-side seeks on behalf of party-synced premium users
+      try {
+        const performSeekForUser = async (sessionId, sessionUserLabel) => {
+          try {
+            if (!sessionId) return;
+            const sess = sessionManager.getSession(sessionId);
+            if (!sess || !sess.access_token) {
+              if (typeof shouldLog === 'function' ? shouldLog(`seek_no_session_${sessionId}`) : true) console.log(`ℹ️ No active session token for session ${sessionId} (user=${sessionUserLabel}), skipping server-side seek`);
+              return;
+            }
+            const url = `https://api.spotify.com/v1/me/player/seek?position_ms=${Math.round(position_ms)}`;
+            try {
+              const resp = await axios.put(url, null, { headers: { Authorization: `Bearer ${sess.access_token}` }, timeout: 8000 });
+              if (typeof shouldLog === 'function' ? shouldLog(`seek_success_${sessionId}`) : true) console.log(`🔁 Server-side seek success for session ${sessionId} (user=${sessionUserLabel}) -> status=${resp.status}`);
+            } catch (err) {
+              const status = err?.response?.status;
+              const data = err?.response?.data;
+              console.warn(`⚠️ Server-side seek failed for session ${sessionId} (user=${sessionUserLabel}) status=${status} data=${JSON.stringify(data)}`);
+            }
+          } catch (e) {
+            console.warn('⚠️ performSeekForUser unexpected error:', e);
+          }
+        };
+
+        // Space requests to avoid bursts
+        let delayMs = 0;
+        for (const [sockId, user] of connectedUsers.entries()) {
+          try {
+            if (user && user.isSyncedWithParty && user.sessionId && user.premium) {
+              setTimeout(() => {
+                performSeekForUser(user.sessionId, user.name || user.spotifyId || sockId);
+              }, delayMs);
+              delayMs += 150;
+            }
+          } catch (e) {
+            console.warn('⚠️ Error scheduling server-side seek for user entry:', e);
+          }
+        }
+      } catch (err) {
+        console.warn('⚠️ Failed to initiate server-side seeks for synced users:', err);
+      }
+      // Instruct each synced client to perform a local seek so their Spotify device position is updated.
+      try {
+        for (const [sockId, user] of connectedUsers.entries()) {
+          // Only instruct clients that are both party-synced and premium (can call Spotify play/seek APIs)
+          if (user && user.isSyncedWithParty && user.premium) {
+            if (typeof shouldLog === 'function' ? shouldLog(`instruct_seek_${sockId}`, 1000) : true) {
+              console.log(`ℹ️ Instructing socket ${sockId} (user=${user.name}) to perform local seek to ${position_ms}ms`);
+            }
+            ioInstance.to(sockId).emit('perform_playback_control', {
+              action: { type: 'seek', payload: { position_ms } },
+              requestedBy: 'server'
+            });
+          }
+        }
+      } catch (e) {
+        console.warn('⚠️ Failed to instruct synced clients to perform local seek:', e);
+      }
+    }
+  } catch (err) {
+    console.warn('⚠️ Failed to broadcast party_state on seekPartyPlayback:', err);
+  }
 };
 
 // Main socket handler entrypoint
@@ -981,8 +1059,13 @@ const socketHandler = (io) => {
     socket.on('perform_playback_result', (data) => {
       try {
         const requestedSocketId = data?.requestedSocketId;
-        if (requestedSocketId && io) {
-          io.to(requestedSocketId).emit('perform_playback_result', data);
+        // Log the result for debugging
+        try {
+          console.log(`🔁 perform_playback_result from ${socket.id} (user=${connectedUsers.get(socket.id)?.name || 'unknown'}):`, JSON.stringify(data));
+        } catch (e) { console.log('🔁 perform_playback_result (raw):', data); }
+
+        if (requestedSocketId && ioInstance) {
+          ioInstance.to(requestedSocketId).emit('perform_playback_result', data);
         }
 
         // Broadcast updated playback state so UIs refresh

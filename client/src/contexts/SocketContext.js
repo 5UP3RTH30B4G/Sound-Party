@@ -244,8 +244,31 @@ export const SocketProvider = ({ children, socket }) => {
 
         if (body) opts.body = JSON.stringify(body);
 
+        // If this perform_playback_control was requestedBy the server, add a
+        // header so the server can ignore the resulting /seek call and avoid
+        // a seek->broadcast->seek loop that causes excessive Spotify API usage.
+        try {
+          if (data && data.requestedBy === 'server') {
+            opts.headers['X-SKIP-PARTY-SEEK'] = '1';
+          }
+        } catch (e) { /* ignore */ }
+
+        // Debug: log that we are about to execute the API request and show cookies (for debugging only)
+        try {
+          console.log('perform_playback_control -> about to fetch', url, 'opts:', opts, 'document.cookie:', typeof document !== 'undefined' ? document.cookie : 'no-document');
+        } catch (e) {}
+
         // Execute the API request; using relative path ensures cookies/session are sent
         const res = await fetch(url, opts);
+
+        // Debug: try to read and log response body for troubleshooting (clone so we can still use res later)
+        try {
+          const clone = res.clone();
+          const bodyText = await clone.text();
+          console.log(`perform_playback_control -> fetch ${url} returned status=${res.status}, body=${bodyText}`);
+        } catch (e) {
+          console.warn('perform_playback_control -> failed to read response body for debug:', e);
+        }
 
         if (!res.ok) {
           const text = await res.text();
@@ -254,9 +277,14 @@ export const SocketProvider = ({ children, socket }) => {
           return;
         }
 
-        // Notify server and trigger a sync so all clients get updated playback state
+        // Notify server of the result. For actions that were originally
+        // requested by the server (requestedBy === 'server') we avoid asking
+        // for a full sync immediately to prevent echo loops; the server
+        // already broadcasts party state when applicable.
         socket.emit('perform_playback_result', { success: true, action: action.type, requestedBy: data.requestedBy });
-        socket.emit('request_sync');
+        if (data.requestedBy !== 'server') {
+          socket.emit('request_sync');
+        }
         addSystemMessage(`✅ Action ${action.type} effectuée pour ${data.requestedBy}`, 'success');
       } catch (err) {
         console.error('❌ Erreur perform_playback_control:', err);

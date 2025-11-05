@@ -637,20 +637,22 @@ const PlayerControls = () => {
     } catch (e) {}
 
     return () => {
-      try {
-        console.log('estimator cleanup — clearing interval if present', {
-          isPlaying,
-          currentTrackId: currentTrack?.id,
-          duration,
-          baselineReady,
-          intervalExists: !!estimateIntervalRef.current
-        });
-      } catch (e) {}
-      if (estimateIntervalRef.current) {
-        clearInterval(estimateIntervalRef.current);
-        estimateIntervalRef.current = null;
+      if (debugLog) {
+        try {
+          console.log('estimator cleanup — clearing interval if present', {
+            isPlaying,
+            currentTrackId: currentTrack?.id,
+            duration,
+            baselineReady,
+            intervalExists: !!estimateIntervalRef.current
+          });
+        } catch (e) {}
+        if (estimateIntervalRef.current) {
+          clearInterval(estimateIntervalRef.current);
+          estimateIntervalRef.current = null;
+        }
+        try { console.log('estimator interval cleared'); } catch (e) {}
       }
-      try { console.log('estimator interval cleared'); } catch (e) {}
     };
   }, [isPlaying, currentTrack, duration, playbackState, partyState, isSyncedWithParty, emitPlayNextFromQueue, baselineReady, emitPlaybackControl, user?.product, activeState]);
 
@@ -879,33 +881,6 @@ const PlayerControls = () => {
       console.error('Erreur lors du changement d\'appareil:', error);
     }
   };
-
-  // When client becomes synced with a party, ensure we stop local playback
-  // to avoid playing audio locally while following the party.
-  useEffect(() => {
-    if (!isSyncedWithParty) return;
-
-    // Only attempt to pause local playback for premium users (who can control devices)
-    if (user?.product !== 'premium') return;
-
-    (async () => {
-      try {
-        if (!API_BASE_URL) return;
-        const resp = await fetch(`${API_BASE_URL}/api/spotify/pause`, {
-          method: 'PUT',
-          credentials: 'include'
-        });
-        if (resp.ok) {
-          console.info('Local playback paused after joining party to avoid duplicate audio');
-        } else {
-          const txt = await resp.text();
-          console.warn('Pause on join party returned non-ok:', txt);
-        }
-      } catch (err) {
-        console.warn('Failed to pause local playback when joining party:', err);
-      }
-    })();
-  }, [isSyncedWithParty, user?.product, API_BASE_URL]);
 
   const formatTime = (ms) => {
     const minutes = Math.floor(ms / 60000);

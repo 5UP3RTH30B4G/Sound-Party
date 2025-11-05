@@ -553,10 +553,22 @@ router.put('/seek', requireAuth, async (req, res) => {
     });
     console.log('✅ Position changée à:', Math.round(position_ms) + 'ms');
     
-    // If in Party mode, update server-side Party state to prevent position oscillation
-    if (socketHandler.partyPlaybackState && socketHandler.partyPlaybackState.currentTrack) {
-      console.log('🎉 Party mode detected — updating server Party position to', position_ms);
-      socketHandler.seekPartyPlayback(position_ms);
+    // If the incoming request includes the X-SKIP-PARTY-SEEK header it means
+    // the client was executing a server-requested local seek. In that case we
+    // must NOT call seekPartyPlayback again (it would re-broadcast and cause a
+    // seek -> broadcast -> seek loop). Honor the header to avoid excessive
+    // Spotify API usage.
+    const skipPartySeekHeader = (req.get('x-skip-party-seek') || req.query.skip_party_seek || '').toString();
+    const skipPartySeek = skipPartySeekHeader === '1' || skipPartySeekHeader.toLowerCase() === 'true';
+
+    if (skipPartySeek) {
+      if (typeof shouldLog === 'function' ? shouldLog('skip_party_seek_header') : true) console.log('ℹ️ /seek called with X-SKIP-PARTY-SEEK - skipping server-side seekPartyPlayback');
+    } else {
+      // If in Party mode, update server-side Party state to prevent position oscillation
+      if (socketHandler.partyPlaybackState && socketHandler.partyPlaybackState.currentTrack) {
+        console.log('🎉 Party mode detected — updating server Party position to', position_ms);
+        socketHandler.seekPartyPlayback(position_ms);
+      }
     }
     
     res.json({ success: true, position_ms: position_ms });
