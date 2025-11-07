@@ -1056,7 +1056,7 @@ const socketHandler = (io) => {
     });
 
     // When a client reports back the result of an action, forward it to the original requester
-    socket.on('perform_playback_result', (data) => {
+    socket.on('perform_playback_result', async (data) => {
       try {
         const requestedSocketId = data?.requestedSocketId;
         // Log the result for debugging
